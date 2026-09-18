@@ -171,3 +171,20 @@ the LFS byte count when present.
 - The `--repos` directory must never live inside a cloud-synced folder (e.g.
   OneDrive); Refuge checks for this and will refuse to initialize otherwise.
 - See `docs/product/2026-09-18-refuge-prd.md` for the full product rationale.
+
+## Development
+
+The release test suite requires stable Rust, Git, and Git LFS. It intentionally
+fails instead of skipping the real LFS backup/restore scenarios when `git-lfs`
+is unavailable.
+
+```sh
+git lfs version
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+CI runs the same checks on Linux and Windows. Test subprocesses must use the
+isolated helpers in `tests/support` so they never read or modify a developer's
+real home directory or global/system Git configuration.
