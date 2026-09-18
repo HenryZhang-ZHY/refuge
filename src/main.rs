@@ -1,56 +1,99 @@
 use std::path::PathBuf;
+use std::process;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+const ROOT_HELP: &str = "Typical workflow:
+  1. refuge init --repos <LOCAL_DIR> --target <SYNC_DIR>
+  2. refuge repo create <NAME>
+  3. Run the printed `git remote add refuge ...` command in your working copy
+  4. git push refuge main
+  5. refuge status <NAME>
+
+Refuge verifies snapshots written to the target directory. Cloud upload is not verified;
+your sync client remains responsible for uploading that directory.";
+
 #[derive(Debug, Parser)]
-#[command(name = "refuge", version, about = "Local-first Git repository backup")]
+#[command(
+    name = "refuge",
+    version,
+    about = "Local-first Git repository backup",
+    long_about = "Host live Git repositories outside sync folders and publish verified, immutable snapshots to a filesystem target.",
+    arg_required_else_help = true,
+    after_help = ROOT_HELP
+)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Commands,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Initialize Refuge's local configuration.
+    #[command(after_help = "Example:\n  refuge init --repos <LOCAL_DIR> --target <SYNC_DIR>")]
     Init {
         /// Directory that will contain live bare repositories.
-        #[arg(long)]
+        #[arg(long, value_name = "LOCAL_DIR")]
         repos: Option<PathBuf>,
         /// Directory that will receive immutable backup snapshots.
-        #[arg(long)]
-        target: Option<PathBuf>,
+        #[arg(long, value_name = "SYNC_DIR")]
+        target: PathBuf,
     },
     /// Create or import hosted repositories.
+    #[command(
+        after_help = "Examples:\n  refuge repo create notes\n  refuge repo import notes <EXISTING_REPO>"
+    )]
     Repo {
         #[command(subcommand)]
         command: RepoCommands,
     },
     /// Create and publish a verified repository snapshot.
+    #[command(
+        after_help = "Examples:\n  refuge backup notes\n  refuge backup --repo-path <BARE_REPO>"
+    )]
     Backup {
         /// Hosted repository name.
-        #[arg(required_unless_present = "repo_path", conflicts_with = "repo_path")]
+        #[arg(
+            value_name = "NAME",
+            required_unless_present = "repo_path",
+            conflicts_with = "repo_path"
+        )]
         name: Option<String>,
         /// Explicit bare repository path (used by the post-receive hook).
-        #[arg(long)]
+        #[arg(long, value_name = "BARE_REPO")]
         repo_path: Option<PathBuf>,
     },
     /// Show whether hosted repositories match their newest snapshots.
-    Status { name: Option<String> },
+    #[command(after_help = "Examples:\n  refuge status\n  refuge status notes")]
+    Status {
+        /// Repository name. Omit it to show every hosted repository.
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+    },
     /// Inspect published snapshots.
     Snapshots {
         #[command(subcommand)]
         command: SnapshotCommands,
     },
     /// Restore a repository from a verified snapshot.
+    #[command(
+        after_help = "Examples:\n  refuge restore notes\n  refuge restore <REPO_ID> --snapshot <SNAPSHOT_ID> --as recovered-notes"
+    )]
     Restore {
+        /// Repository name or stable UUID to discover in the target.
+        #[arg(value_name = "NAME_OR_REPO_ID")]
         name_or_repo_id: String,
-        #[arg(long)]
+        /// Restore this snapshot ID instead of the newest valid snapshot.
+        #[arg(long, value_name = "SNAPSHOT_ID")]
         snapshot: Option<String>,
-        #[arg(long = "as")]
+        /// Register the restored repository under a different local name.
+        #[arg(long = "as", value_name = "NAME")]
         as_name: Option<String>,
-        #[arg(long)]
+        /// Read snapshots from this target instead of the configured target.
+        #[arg(long, value_name = "SYNC_DIR")]
         target: Option<PathBuf>,
+        /// Replace an existing hosted repository after the snapshot is verified.
         #[arg(long)]
         replace: bool,
     },
@@ -64,9 +107,22 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum RepoCommands {
     /// Create a new empty bare repository.
-    Create { name: String },
+    #[command(after_help = "Example:\n  refuge repo create notes")]
+    Create {
+        /// Repository name (letters, digits, dots, dashes, and underscores).
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
     /// Import an existing repository with mirror semantics.
-    Import { name: String, path: PathBuf },
+    #[command(after_help = "Example:\n  refuge repo import notes <EXISTING_REPO>")]
+    Import {
+        /// Name to give the hosted repository.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Existing Git working tree or bare repository to mirror.
+        #[arg(value_name = "EXISTING_REPO")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -77,18 +133,31 @@ enum HookCommands {
 #[derive(Debug, Subcommand)]
 enum SnapshotCommands {
     /// List snapshot manifests and validate artifact presence and size.
+    #[command(
+        after_help = "Examples:\n  refuge snapshots list\n  refuge snapshots list notes\n  refuge snapshots list <REPO_ID> --target <SYNC_DIR>"
+    )]
     List {
+        /// Repository name or stable UUID. Omit it to list all snapshots.
+        #[arg(value_name = "NAME_OR_REPO_ID")]
         name_or_repo_id: Option<String>,
-        #[arg(long)]
+        /// Read from this target instead of the configured target.
+        #[arg(long, value_name = "SYNC_DIR")]
         target: Option<PathBuf>,
     },
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("refuge: {error:#}");
+        process::exit(2);
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Commands::Init { repos, target }) => {
-            let (config, path) = refuge::config::initialize(repos, target)?;
+        Commands::Init { repos, target } => {
+            let (config, path) = refuge::config::initialize(repos, Some(target))?;
             println!("initialized refuge at {}", path.display());
             println!("Repositories: {}", config.repos_dir.display());
             println!("Backup target: {}", config.target_root.display());
@@ -97,7 +166,7 @@ fn main() -> Result<()> {
             );
             println!("Next: refuge repo create <name>");
         }
-        Some(Commands::Repo { command }) => {
+        Commands::Repo { command } => {
             let config = refuge::config::Config::load()?;
             let repository = match command {
                 RepoCommands::Create { name } => refuge::repo::create(&config, &name)?,
@@ -109,7 +178,7 @@ fn main() -> Result<()> {
                 repository.path.display()
             );
         }
-        Some(Commands::Backup { name, repo_path }) => {
+        Commands::Backup { name, repo_path } => {
             let config = refuge::config::Config::load()?;
             let manifest = match (name, repo_path) {
                 (Some(name), None) => refuge::backup::backup_named(&config, &name)?,
@@ -118,7 +187,7 @@ fn main() -> Result<()> {
             };
             print_protected(&manifest);
         }
-        Some(Commands::Status { name }) => {
+        Commands::Status { name } => {
             let config = refuge::config::Config::load()?;
             for (repository, state) in refuge::discovery::statuses(&config, name.as_deref())? {
                 let description = match state {
@@ -138,13 +207,13 @@ fn main() -> Result<()> {
                 println!("{}: {description}", repository.name);
             }
         }
-        Some(Commands::Snapshots {
+        Commands::Snapshots {
             command:
                 SnapshotCommands::List {
                     name_or_repo_id,
                     target,
                 },
-        }) => {
+        } => {
             let config = refuge::config::Config::load()?;
             let target = target.as_deref().unwrap_or(&config.target_root);
             for snapshot in refuge::discovery::list_snapshots(target, name_or_repo_id.as_deref())? {
@@ -157,13 +226,13 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Some(Commands::Restore {
+        Commands::Restore {
             name_or_repo_id,
             snapshot,
             as_name,
             target,
             replace,
-        }) => {
+        } => {
             let config = refuge::config::Config::load()?;
             let target = target.as_deref().unwrap_or(&config.target_root);
             let restored = refuge::restore::restore(
@@ -183,9 +252,9 @@ fn main() -> Result<()> {
                 restored.path.display()
             );
         }
-        Some(Commands::Hook {
+        Commands::Hook {
             command: HookCommands::PostReceive,
-        }) => {
+        } => {
             let result = refuge::config::Config::load().and_then(|config| {
                 let path = std::env::current_dir()?;
                 refuge::backup::backup_path(&config, &path)
@@ -195,7 +264,6 @@ fn main() -> Result<()> {
                 Err(error) => eprintln!("refuge: backup failed: {error:#}"),
             }
         }
-        None => {}
     }
     Ok(())
 }

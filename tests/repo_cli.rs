@@ -100,5 +100,8 @@ fn repo_create_rejects_unsafe_name() {
         .args(["repo", "create", "../escape"])
         .assert()
         .failure()
-        .stderr(contains("invalid repository name"));
+        .stderr(contains("invalid repository name"))
+        .stderr(contains(
+            "use letters, digits, dots, dashes, or underscores",
+        ));
 }

@@ -90,7 +90,9 @@ fn validate_name(name: &str) -> Result<()> {
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character));
     if !valid {
-        bail!("invalid repository name: {name}");
+        bail!(
+            "invalid repository name `{name}`: use letters, digits, dots, dashes, or underscores, and omit the `.git` suffix"
+        );
     }
     Ok(())
 }

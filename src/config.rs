@@ -14,7 +14,14 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        Self::load_from(&default_path()?)
+        let path = default_path()?;
+        if !path.exists() {
+            bail!(
+                "Refuge is not initialized: config not found at {}. Run `refuge init --repos <LOCAL_DIR> --target <SYNC_DIR>`.",
+                path.display()
+            );
+        }
+        Self::load_from(&path)
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {
