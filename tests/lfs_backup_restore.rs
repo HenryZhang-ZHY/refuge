@@ -205,6 +205,7 @@ fn restore_rejects_a_tampered_lfs_archive() {
 
     let repo_id = repo_id_of(&repos, "vault");
     let manifest = read_manifest(&target, &repo_id);
+    let snapshot_id = manifest.snapshot_id.clone();
     let lfs_artifact = manifest
         .lfs_artifact
         .expect("an LFS artifact was published");
@@ -219,7 +220,14 @@ fn restore_rejects_a_tampered_lfs_archive() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["restore", "vault", "--as", "tampered"])
+        .args([
+            "restore",
+            "vault",
+            "--snapshot",
+            &snapshot_id,
+            "--as",
+            "tampered",
+        ])
         .assert()
         .failure()
         .stderr(contains("checksum or size differs"));

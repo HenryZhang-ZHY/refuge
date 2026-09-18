@@ -101,6 +101,21 @@ impl Manifest {
             _ => None,
         }
     }
+
+    pub fn ref_state(&self) -> RefState {
+        let refs = self
+            .refs
+            .iter()
+            .filter_map(|(name, value)| match value {
+                ManifestRef::Object(oid) => Some((name.clone(), oid.clone())),
+                ManifestRef::Symbolic { .. } => None,
+            })
+            .collect();
+        RefState {
+            refs,
+            head: self.head().map(str::to_owned),
+        }
+    }
 }
 
 pub fn paths_in(snapshots: &Path) -> Result<Vec<PathBuf>> {

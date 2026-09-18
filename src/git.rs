@@ -243,3 +243,8 @@ pub fn set_symbolic_head(repo: &Path, target: &str) -> Result<()> {
     run(Some(repo), &["symbolic-ref", "HEAD", target])?;
     Ok(())
 }
+
+pub fn fsck(repo: &Path) -> Result<()> {
+    run(Some(repo), &["fsck", "--full", "--strict"])?;
+    Ok(())
+}

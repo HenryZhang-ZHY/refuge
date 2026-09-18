@@ -400,6 +400,9 @@ fn run() -> Result<()> {
                 restored.snapshot_id,
                 restored.path.display()
             );
+            for skipped in restored.skipped_candidates {
+                eprintln!("refuge: warning: skipped newer snapshot: {skipped}");
+            }
         }
         Commands::Hook {
             command: HookCommands::PostReceive,

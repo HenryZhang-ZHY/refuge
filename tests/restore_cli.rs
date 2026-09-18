@@ -126,6 +126,7 @@ fn restored_repository_preserves_identity_and_can_back_up_again() {
         .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
         .max_by_key(|manifest: &Manifest| manifest.generation)
         .unwrap();
+    let snapshot_id = manifest.snapshot_id.clone();
     let bundle = target
         .join("refuge/v1/repos")
         .join(&repo_id)
@@ -137,11 +138,36 @@ fn restored_repository_preserves_identity_and_can_back_up_again() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["restore", "vault", "--as", "tampered"])
+        .args([
+            "restore",
+            "vault",
+            "--snapshot",
+            &snapshot_id,
+            "--as",
+            "tampered",
+        ])
         .assert()
         .failure()
         .stderr(contains("checksum or size differs"));
     assert!(!repos.join("tampered.git").exists());
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["restore", "vault", "--as", "fallback"])
+        .assert()
+        .success()
+        .stdout(contains("restored fallback"))
+        .stderr(contains("skipped newer snapshot"))
+        .stderr(contains("checksum or size differs"));
+    assert!(
+        git::ref_state(&repos.join("fallback.git"))
+            .unwrap()
+            .refs
+            .is_empty()
+    );
+    std::fs::remove_dir_all(repos.join("fallback.git")).unwrap();
+
     std::fs::write(&bundle, original_bundle).unwrap();
 
     Command::cargo_bin("refuge")
