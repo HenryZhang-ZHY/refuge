@@ -135,8 +135,8 @@ enum RepoCommands {
         #[arg(long)]
         connect: bool,
         /// Remote name used with --connect.
-        #[arg(long, default_value = "refuge", value_name = "NAME")]
-        remote: String,
+        #[arg(long, requires = "connect", value_name = "NAME")]
+        remote: Option<String>,
     },
     /// List hosted repositories.
     #[command(alias = "ls")]
@@ -250,6 +250,7 @@ fn run() -> Result<()> {
                         repository.path.display()
                     );
                     if connect {
+                        let remote = remote.unwrap_or_else(|| "refuge".to_owned());
                         let (hosted, _) =
                             refuge::repo::connect_at(&config, &name, &remote, false, &path)?;
                         println!(

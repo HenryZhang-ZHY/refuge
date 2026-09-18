@@ -206,6 +206,15 @@ fn connect_and_dot_selector_operate_on_the_current_working_copy() {
         git_output(&work, &["remote", "get-url", "refuge"]),
         repos.join("notes.git").display().to_string()
     );
+    git_output(
+        &work,
+        &[
+            "remote",
+            "add",
+            "backup",
+            repos.join("notes.git").to_str().unwrap(),
+        ],
+    );
 
     Command::cargo_bin("refuge")
         .unwrap()

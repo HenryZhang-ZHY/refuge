@@ -70,12 +70,26 @@ pub fn current(config: &Config) -> Result<(HostedRepository, String)> {
             }
         }
     }
-    matches.sort_by(|left, right| left.0.name.cmp(&right.0.name));
-    matches.dedup_by(|left, right| left.0.id == right.0.id && left.1 == right.1);
+    matches.sort_by(|left, right| {
+        left.0.name.cmp(&right.0.name).then_with(|| {
+            remote_priority(&left.1)
+                .cmp(&remote_priority(&right.1))
+                .then_with(|| left.1.cmp(&right.1))
+        })
+    });
+    matches.dedup_by(|left, right| left.0.id == right.0.id);
     match matches.len() {
         0 => bail!("current Git repository is not connected to a hosted Refuge repository"),
         1 => Ok(matches.pop().expect("one current repository match")),
         _ => bail!("current Git repository is connected to multiple hosted Refuge repositories"),
+    }
+}
+
+fn remote_priority(name: &str) -> u8 {
+    match name {
+        "refuge" => 0,
+        "origin" => 1,
+        _ => 2,
     }
 }
 
