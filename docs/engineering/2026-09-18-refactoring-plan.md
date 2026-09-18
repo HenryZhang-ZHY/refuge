@@ -1,12 +1,32 @@
 ---
 title: Refuge Technical Debt Assessment and Refactoring Plan
-status: Proposed
+status: Implemented; cross-platform release gates pending
 date: 2026-09-18
 baseline: c11ba68
 reference: tgrep b1d0fc2
 ---
 
 # Refuge Technical Debt Assessment and Refactoring Plan
+
+## Execution record
+
+R0 through R8 were implemented on 2026-09-18 in independently reversible
+commits following this document's dependency order. The resulting code keeps a
+single crate while adding isolated staging, semantic manifest validation, a
+fault-tolerant catalog, no-clobber publication, complete restore verification
+with fallback, reachable-history LFS validation, staged repository lifecycle
+and replacement recovery, shared application provisioning, atomic
+configuration, CI, and a measured performance harness.
+
+Local Linux verification passed formatting, Clippy with warnings denied, 17
+unit tests, 39 ordinary integration tests, and all five first-use BDD scenarios.
+The real Git LFS BDD remains an explicit CI gate but was not runnable in the
+implementation environment because `git-lfs` was absent. Windows CI and actual
+sync-client behavior require a pushed branch/PR and are not established by the
+local run. Process-crash recovery is covered by deterministic state fixtures;
+physical power-loss durability is not claimed. Concurrent native Git pushes do
+not participate in Refuge's replacement locks, so `restore --replace` still
+requires maintenance exclusion from writers.
 
 ## 1. Recommendation and scope
 
