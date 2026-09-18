@@ -27,6 +27,43 @@ Check the installed CLI version with:
 refuge version
 ```
 
+## Docker server
+
+Server mode is a single-container, single-owner Git host with an embedded Web UI.
+It exposes standard Git Smart HTTP and Git LFS endpoints; client machines need
+only `git` and, for LFS repositories, `git-lfs`. There is no Refuge-specific Git
+transport.
+
+Create a fixed owner key and start the included Compose stack:
+
+```sh
+openssl rand -hex 32 > refuge-secret.txt
+chmod 600 refuge-secret.txt
+docker compose up --build -d
+```
+
+Open <http://127.0.0.1:7788>, sign in with that key, and create a repository.
+The dashboard displays a copyable standard clone command:
+
+```sh
+git clone http://127.0.0.1:7788/git/notes.git
+```
+
+When Git asks for credentials, use `refuge` as the username and the same owner
+key as the password. A Git credential helper can store it normally. The key is
+also used by the Web UI to obtain an HttpOnly session cookie and is not stored
+in browser local storage.
+
+The image persists live repositories and its durable backup queue in
+`/var/lib/refuge`; verified immutable snapshots go to `/backup`. The supplied
+Compose file uses named volumes for both. Replace the `/backup` volume with a
+bind-mounted NAS or backup filesystem when desired, ensuring UID 10001 can
+write it.
+
+The default port mapping is loopback-only. Put Caddy, Tailscale Serve, or
+another TLS terminator in front before exposing the service to other machines.
+The server itself deliberately serves HTTP inside that trusted boundary.
+
 ## Getting Started
 
 ### 1. Initialize Refuge
