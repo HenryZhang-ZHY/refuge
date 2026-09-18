@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 
 use assert_cmd::Command;
 use predicates::str::contains;
@@ -95,10 +95,34 @@ fn push_publishes_verified_bundle_then_manifest() {
     let artifact = manifest.artifact.expect("bundle artifact");
     let bundle = target
         .join("refuge/v1/repos")
-        .join(repo_id)
+        .join(&repo_id)
         .join(artifact.key);
     assert_eq!(std::fs::metadata(&bundle).unwrap().len(), artifact.size);
     refuge::git::bundle_verify(&hosted, &bundle).unwrap();
+
+    let mut first = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("refuge"))
+        .env("REFUGE_CONFIG", &config)
+        .args(["backup", "ledger"])
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut second = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("refuge"))
+        .env("REFUGE_CONFIG", &config)
+        .args(["backup", "ledger"])
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(first.wait().unwrap().success());
+    assert!(second.wait().unwrap().success());
+    let generations: Vec<_> = manifests(&target, &repo_id)
+        .into_iter()
+        .map(|path| {
+            serde_json::from_slice::<Manifest>(&std::fs::read(path).unwrap())
+                .unwrap()
+                .generation
+        })
+        .collect();
+    assert_eq!(generations, [1, 2, 3]);
 }
 
 #[test]

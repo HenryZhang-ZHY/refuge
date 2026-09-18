@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -31,6 +31,20 @@ pub fn backup_path(config: &Config, path: &Path) -> Result<Manifest> {
     let repo_id = Uuid::parse_str(&git::config_get(path, "refuge.repoid")?)
         .context("repository has an invalid refuge.repoid")?;
     let repo_name = repository_name(path)?;
+
+    let staging = config.target_root.join(".refuge-staging");
+    fs::create_dir_all(&staging)
+        .with_context(|| format!("could not create {}", staging.display()))?;
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(staging.join(format!("{repo_id}.lock")))?;
+    // Generation selection, artifact publication, and manifest publication
+    // form one per-repository transaction. OS locks are released on crashes.
+    fs2::FileExt::lock_exclusive(&lock_file).context("could not lock repository backup")?;
+
     let repository_root = config
         .target_root
         .join("refuge/v1/repos")
@@ -50,9 +64,6 @@ pub fn backup_path(config: &Config, path: &Path) -> Result<Manifest> {
     let instance = config.instance_id.simple().to_string();
     let snapshot_id = format!("{compact}-g{generation}-{}", &instance[..8]);
 
-    let staging = config.target_root.join(".refuge-staging");
-    fs::create_dir_all(&staging)
-        .with_context(|| format!("could not create {}", staging.display()))?;
     let staged_bundle = staging.join(format!("{snapshot_id}.bundle"));
 
     let (state, artifact) = create_artifact(path, &snapshots, &snapshot_id, &staged_bundle)?;
