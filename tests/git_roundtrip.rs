@@ -7,6 +7,10 @@ use tempfile::TempDir;
 
 fn run_git(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
+        // Newer git defaults to `safe.bareRepository = explicit`, which
+        // refuses to auto-detect a bare repository via `-C`. This helper is
+        // used against bare repos elsewhere in this file, so opt back in.
+        .args(["-c", "safe.bareRepository=all"])
         .arg("-C")
         .arg(repo)
         .args(args)

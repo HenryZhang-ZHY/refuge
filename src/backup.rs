@@ -35,12 +35,14 @@ pub fn backup_path(config: &Config, path: &Path) -> Result<Manifest> {
     let staging = config.target_root.join(".refuge-staging");
     fs::create_dir_all(&staging)
         .with_context(|| format!("could not create {}", staging.display()))?;
+    let lock_path = staging.join(format!("{repo_id}.lock"));
     let lock_file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(staging.join(format!("{repo_id}.lock")))?;
+        .open(&lock_path)
+        .with_context(|| format!("could not open lock file {}", lock_path.display()))?;
     // Generation selection, artifact publication, and manifest publication
     // form one per-repository transaction. OS locks are released on crashes.
     fs2::FileExt::lock_exclusive(&lock_file).context("could not lock repository backup")?;
@@ -134,7 +136,8 @@ fn create_artifact(
 fn publish_file(source: &Path, destination: &Path) -> Result<()> {
     let partial = destination.with_extension("bundle.partial");
     if partial.exists() {
-        fs::remove_file(&partial)?;
+        fs::remove_file(&partial)
+            .with_context(|| format!("could not remove stale {}", partial.display()))?;
     }
     fs::copy(source, &partial).with_context(|| {
         format!(
@@ -143,15 +146,19 @@ fn publish_file(source: &Path, destination: &Path) -> Result<()> {
             partial.display()
         )
     })?;
-    File::open(&partial)?.sync_all()?;
+    sync_best_effort(
+        &File::open(&partial).with_context(|| format!("could not reopen {}", partial.display()))?,
+    );
     fs::rename(&partial, destination)
         .with_context(|| format!("could not publish artifact {}", destination.display()))?;
-    fs::remove_file(source)?;
+    fs::remove_file(source)
+        .with_context(|| format!("could not remove staged source {}", source.display()))?;
     Ok(())
 }
 
 pub(crate) fn checksum(path: &Path) -> Result<(String, u64)> {
-    let mut file = File::open(path)?;
+    let mut file =
+        File::open(path).with_context(|| format!("could not open {}", path.display()))?;
     let mut digest = Sha256::new();
     let mut size = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
@@ -203,12 +210,23 @@ fn write_json_atomic<T: Serialize>(destination: &Path, value: &T) -> Result<()> 
             .and_then(|extension| extension.to_str())
             .unwrap_or("json")
     ));
-    let mut file = File::create(&partial)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
+    let mut file = File::create(&partial)
+        .with_context(|| format!("could not create {}", partial.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("could not write {}", partial.display()))?;
+    sync_best_effort(&file);
     drop(file);
     fs::rename(&partial, destination)
         .with_context(|| format!("could not publish {}", destination.display()))
+}
+
+// `sync_all` (fsync/FlushFileBuffers) is best-effort: some target
+// filesystems (notably cloud-sync folders like OneDrive's Files On-Demand)
+// deny explicit flushes even though the write itself already succeeded.
+// The subsequent rename is still atomic on the local filesystem, and
+// Refuge does not claim to verify durability of the cloud upload anyway.
+fn sync_best_effort(file: &File) {
+    let _ = file.sync_all();
 }
 
 fn repository_name(path: &Path) -> Result<String> {

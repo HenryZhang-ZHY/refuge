@@ -43,7 +43,12 @@ fn output_error(args: &[&str], output: &Output) -> anyhow::Error {
 fn run(repo: Option<&Path>, args: &[&str]) -> Result<Output> {
     let mut command = Command::new("git");
     if let Some(repo) = repo {
-        command.arg("-C").arg(repo);
+        // Refuge only ever runs these commands against bare repositories
+        // (hosted repos, verification dirs, staging dirs). Passing
+        // `--git-dir` explicitly (instead of `-C`, which relies on git's
+        // auto-detection of a bare repo in the current directory) keeps
+        // this working under the `safe.bareRepository = explicit` default.
+        command.arg("--git-dir").arg(repo);
     }
     let output = command
         .args(args)
@@ -70,7 +75,7 @@ pub fn ref_state(repo: &Path) -> Result<RefState> {
     }
 
     let output = Command::new("git")
-        .arg("-C")
+        .arg("--git-dir")
         .arg(repo)
         .args(["symbolic-ref", "--quiet", "HEAD"])
         .output()

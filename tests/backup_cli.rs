@@ -7,7 +7,14 @@ use refuge::manifest::Manifest;
 
 fn git(repo: &Path, args: &[&str], config: Option<&Path>) -> String {
     let mut command = ProcessCommand::new("git");
-    command.arg("-C").arg(repo).args(args);
+    // Newer git defaults to `safe.bareRepository = explicit`, which refuses
+    // to auto-detect a bare repository via `-C`. Tests intentionally invoke
+    // git this way against bare hosted repos, so opt back in explicitly.
+    command
+        .args(["-c", "safe.bareRepository=all"])
+        .arg("-C")
+        .arg(repo)
+        .args(args);
     if let Some(config) = config {
         command.env("REFUGE_CONFIG", config);
     }

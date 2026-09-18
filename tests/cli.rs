@@ -34,8 +34,8 @@ fn init_writes_config_and_creates_directories() {
         .stdout(contains("initialized refuge"));
 
     let config = Config::load_from(&config_path).unwrap();
-    assert_eq!(config.repos_dir, repos.canonicalize().unwrap());
-    assert_eq!(config.target_root, target.canonicalize().unwrap());
+    assert_eq!(config.repos_dir, dunce::canonicalize(&repos).unwrap());
+    assert_eq!(config.target_root, dunce::canonicalize(&target).unwrap());
     assert!(!config.instance_id.is_nil());
 }
 

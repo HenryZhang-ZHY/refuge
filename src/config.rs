@@ -76,11 +76,12 @@ pub fn initialize(repos: Option<PathBuf>, target: Option<PathBuf>) -> Result<(Co
         .with_context(|| format!("could not create repository directory {}", repos.display()))?;
     std::fs::create_dir_all(&target)
         .with_context(|| format!("could not create target directory {}", target.display()))?;
-    let repos = repos
-        .canonicalize()
+    // `dunce::canonicalize` behaves like `Path::canonicalize` but avoids the
+    // `\\?\` extended-length prefix on Windows when a normal path suffices;
+    // the Git CLI mishandles that prefix for some operations (e.g. `clone`).
+    let repos = dunce::canonicalize(&repos)
         .with_context(|| format!("could not resolve repository directory {}", repos.display()))?;
-    let target = target
-        .canonicalize()
+    let target = dunce::canonicalize(&target)
         .with_context(|| format!("could not resolve target directory {}", target.display()))?;
     validate_paths(&repos, &target)?;
 

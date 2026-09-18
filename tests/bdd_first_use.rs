@@ -186,7 +186,14 @@ impl RefugeWorld {
 
 fn git_output(repo: &Path, args: &[&str], config: Option<&Path>) -> Output {
     let mut command = ProcessCommand::new("git");
-    command.arg("-C").arg(repo).args(args);
+    // Newer git defaults to `safe.bareRepository = explicit`, which refuses
+    // to auto-detect a bare repository via `-C`. These steps intentionally
+    // invoke git this way against bare hosted repos, so opt back in.
+    command
+        .args(["-c", "safe.bareRepository=all"])
+        .arg("-C")
+        .arg(repo)
+        .args(args);
     if let Some(config) = config {
         command.env("REFUGE_CONFIG", config);
     }
@@ -220,8 +227,11 @@ fn initialize_refuge(world: &mut RefugeWorld) {
 #[then("Refuge stores both resolved paths in its configuration")]
 fn stores_resolved_paths(world: &mut RefugeWorld) {
     let config = Config::load_from(&world.config).expect("load Refuge config");
-    assert_eq!(config.repos_dir, world.repos.canonicalize().unwrap());
-    assert_eq!(config.target_root, world.target.canonicalize().unwrap());
+    assert_eq!(config.repos_dir, dunce::canonicalize(&world.repos).unwrap());
+    assert_eq!(
+        config.target_root,
+        dunce::canonicalize(&world.target).unwrap()
+    );
 }
 
 #[then("Refuge explains that cloud upload is not verified")]

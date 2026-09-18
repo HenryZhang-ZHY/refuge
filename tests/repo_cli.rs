@@ -7,6 +7,10 @@ use refuge::git;
 
 fn git_output(repo: &Path, args: &[&str]) -> String {
     let output = ProcessCommand::new("git")
+        // Newer git defaults to `safe.bareRepository = explicit`, which
+        // refuses to auto-detect a bare repository via `-C`. This helper is
+        // used against bare hosted repos, so opt back in explicitly.
+        .args(["-c", "safe.bareRepository=all"])
         .arg("-C")
         .arg(repo)
         .args(args)
