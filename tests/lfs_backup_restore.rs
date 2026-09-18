@@ -12,6 +12,22 @@ use predicates::str::contains;
 use refuge::manifest::Manifest;
 use sha2::{Digest, Sha256};
 
+fn git(repo: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(["-c", "safe.bareRepository=all"])
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
 fn initialize(temp: &tempfile::TempDir) -> (PathBuf, PathBuf, PathBuf) {
     let config = temp.path().join("config.toml");
     let repos = temp.path().join("repos");
@@ -232,4 +248,61 @@ fn restore_rejects_a_tampered_lfs_archive() {
         .failure()
         .stderr(contains("checksum or size differs"));
     assert!(!repos.join("tampered.git").exists());
+}
+
+#[test]
+fn backup_requires_lfs_objects_referenced_only_by_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos, target) = initialize(&temp);
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "create", "history"])
+        .assert()
+        .success();
+    let hosted = repos.join("history.git");
+    std::fs::remove_file(hosted.join("hooks/post-receive")).unwrap();
+
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "--initial-branch=main"]);
+    git(&work, &["config", "user.name", "Refuge Test"]);
+    git(&work, &["config", "user.email", "refuge@example.invalid"]);
+    let content = b"historical large object";
+    let oid = format!("{:x}", Sha256::digest(content));
+    let pointer = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {}\n",
+        content.len()
+    );
+    std::fs::write(work.join("attachment.bin"), pointer).unwrap();
+    git(&work, &["add", "attachment.bin"]);
+    git(&work, &["commit", "-m", "add LFS pointer"]);
+    std::fs::write(work.join("attachment.bin"), "small replacement\n").unwrap();
+    git(&work, &["add", "attachment.bin"]);
+    git(&work, &["commit", "-m", "replace pointer"]);
+    git(
+        &work,
+        &["remote", "add", "refuge", hosted.to_str().unwrap()],
+    );
+    git(&work, &["push", "refuge", "main"]);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "backup", "history"])
+        .assert()
+        .failure()
+        .stderr(contains("required LFS object"))
+        .stderr(contains("is missing"));
+
+    assert_eq!(write_lfs_object(&hosted, content), oid);
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "backup", "history"])
+        .assert()
+        .success()
+        .stdout(contains("LFS bytes"));
+    let repo_id = repo_id_of(&repos, "history");
+    assert!(read_manifest(&target, &repo_id).lfs_artifact.is_some());
 }

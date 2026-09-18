@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use crate::config::Config;
 use crate::discovery::{self, Snapshot, SnapshotHealth};
 use crate::storage;
-use crate::{git, repo};
+use crate::{git, lfs, repo};
 
 pub struct RestoreOptions<'a> {
     pub selector: &'a str,
@@ -135,13 +135,19 @@ fn prepare_snapshot(
         })?;
     }
     if let Some(path) = &lfs_archive {
-        extract_lfs_archive(path, &repository).map_err(|error| {
+        lfs::extract_archive(path, &repository).map_err(|error| {
             CandidateFailure::Invalid(format!(
                 "{} has an invalid LFS archive: {error:#}",
                 snapshot.manifest.snapshot_id
             ))
         })?;
     }
+    lfs::verify_repository(&repository).map_err(|error| {
+        CandidateFailure::Invalid(format!(
+            "{} is missing required LFS content: {error:#}",
+            snapshot.manifest.snapshot_id
+        ))
+    })?;
     let actual = git::ref_state(&repository).map_err(CandidateFailure::Fatal)?;
     let expected = snapshot.manifest.ref_state();
     if actual != expected || actual.hash() != snapshot.manifest.ref_state_hash {
@@ -205,22 +211,6 @@ fn copy_artifact(
         )));
     }
     Ok(Some(destination))
-}
-
-/// Extracts a previously verified `lfs.tar` archive into
-/// `<repo>/lfs/objects`, then re-verifies each extracted object's content
-/// hash against its filename (its LFS object id) so a corrupted archive
-/// never produces a silently broken restored repository.
-fn extract_lfs_archive(archive: &Path, repo: &Path) -> Result<()> {
-    let destination = repo.join("lfs").join("objects");
-    fs::create_dir_all(&destination)
-        .with_context(|| format!("could not create {}", destination.display()))?;
-    let file =
-        fs::File::open(archive).with_context(|| format!("could not open {}", archive.display()))?;
-    tar::Archive::new(file)
-        .unpack(&destination)
-        .with_context(|| format!("could not extract {}", archive.display()))?;
-    crate::backup::verify_lfs_objects(&destination)
 }
 
 fn candidates(

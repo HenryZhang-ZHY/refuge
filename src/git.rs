@@ -248,3 +248,34 @@ pub fn fsck(repo: &Path) -> Result<()> {
     run(Some(repo), &["fsck", "--full", "--strict"])?;
     Ok(())
 }
+
+pub fn reachable_objects(repo: &Path) -> Result<Vec<String>> {
+    let output = run(Some(repo), &["rev-list", "--objects", "--all"])?;
+    let stdout = String::from_utf8(output.stdout).context("git returned non-UTF-8 object data")?;
+    Ok(stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect())
+}
+
+pub fn object_type(repo: &Path, oid: &str) -> Result<String> {
+    let output = run(Some(repo), &["cat-file", "-t", oid])?;
+    Ok(String::from_utf8(output.stdout)
+        .context("git returned a non-UTF-8 object type")?
+        .trim()
+        .to_owned())
+}
+
+pub fn object_size(repo: &Path, oid: &str) -> Result<u64> {
+    let output = run(Some(repo), &["cat-file", "-s", oid])?;
+    String::from_utf8(output.stdout)
+        .context("git returned a non-UTF-8 object size")?
+        .trim()
+        .parse()
+        .context("git returned an invalid object size")
+}
+
+pub fn object_contents(repo: &Path, oid: &str) -> Result<Vec<u8>> {
+    Ok(run(Some(repo), &["cat-file", "blob", oid])?.stdout)
+}

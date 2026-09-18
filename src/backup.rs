@@ -1,5 +1,5 @@
-use std::fs::{self, File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::fs::{self, OpenOptions};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::git::{self, RefState};
+use crate::lfs;
 use crate::manifest::{self, Artifact, Manifest};
 use crate::repo;
 use crate::storage::{self, FsSnapshotStore};
@@ -93,25 +94,13 @@ fn backup_path_at(
         })?;
     let staged_bundle = operation.path().join(format!("{snapshot_id}.bundle"));
 
-    let mut warnings = Vec::new();
-    let (state, artifact, artifact_warnings) = create_artifact(
-        path,
-        &snapshots,
-        &snapshot_id,
-        &staged_bundle,
-        after_bundle_created,
-    )?;
-    warnings.extend(artifact_warnings);
+    let (state, artifact) =
+        create_artifact(path, &snapshot_id, &staged_bundle, after_bundle_created)?;
     let staged_lfs = operation.path().join(format!("{snapshot_id}.lfs.tar"));
-    let (lfs_artifact, lfs_warnings) =
-        create_lfs_artifact(path, &snapshots, &snapshot_id, &staged_lfs)?;
-    warnings.extend(lfs_warnings);
-    warnings.extend(
-        write_repo_envelope(&repository_root, repo_id, &repo_name, &created_at)?
-            .warnings()
-            .iter()
-            .cloned(),
-    );
+    let lfs_artifact = create_lfs_artifact(path, &snapshot_id, &staged_lfs, &state)?;
+    let mut warnings = write_repo_envelope(&repository_root, repo_id, &repo_name, &created_at)?
+        .warnings()
+        .to_vec();
 
     let manifest = Manifest {
         schema_version: 1,
@@ -129,27 +118,57 @@ fn backup_path_at(
         refuge_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let manifest_path = snapshots.join(format!("{snapshot_id}.manifest.json"));
+    let mut published = Vec::new();
+    if let Some(descriptor) = &manifest.artifact {
+        let destination = snapshots.join(format!("{snapshot_id}.bundle"));
+        let outcome = FsSnapshotStore.publish_file(
+            &staged_bundle,
+            &destination,
+            &descriptor.checksum,
+            descriptor.size,
+        )?;
+        warnings.extend(outcome.warnings().iter().cloned());
+        published.push(destination);
+    }
+    if let Some(descriptor) = &manifest.lfs_artifact {
+        let destination = snapshots.join(format!("{snapshot_id}.lfs.tar"));
+        match FsSnapshotStore.publish_file(
+            &staged_lfs,
+            &destination,
+            &descriptor.checksum,
+            descriptor.size,
+        ) {
+            Ok(outcome) => {
+                warnings.extend(outcome.warnings().iter().cloned());
+                published.push(destination);
+            }
+            Err(error) => {
+                cleanup_uncommitted(&published);
+                return Err(error);
+            }
+        }
+    }
     // The manifest is the publication marker. Nothing may make a snapshot
     // discoverable until its artifact has been durably renamed into place.
-    warnings.extend(
-        write_json_atomic(&manifest_path, &manifest)?
-            .warnings()
-            .iter()
-            .cloned(),
-    );
+    match write_json_atomic(&manifest_path, &manifest) {
+        Ok(outcome) => warnings.extend(outcome.warnings().iter().cloned()),
+        Err(error) => {
+            cleanup_uncommitted(&published);
+            return Err(error);
+        }
+    }
     Ok(BackupOutcome { manifest, warnings })
 }
 
 fn create_artifact(
     repo_path: &Path,
-    snapshots: &Path,
     snapshot_id: &str,
     staged_bundle: &Path,
     after_bundle_created: impl Fn(),
-) -> Result<(RefState, Option<Artifact>, Vec<String>)> {
+) -> Result<(RefState, Option<Artifact>)> {
     let mut state = git::ref_state(repo_path)?;
     if state.refs.is_empty() {
-        return Ok((state, None, Vec::new()));
+        return Ok((state, None));
     }
 
     for attempt in 0..2 {
@@ -162,9 +181,6 @@ fn create_artifact(
         if git::bundle_list_heads(staged_bundle)? == state.refs {
             let (checksum, size) = storage::checksum(staged_bundle)?;
             let file_name = format!("{snapshot_id}.bundle");
-            let destination = snapshots.join(&file_name);
-            let outcome =
-                FsSnapshotStore.publish_file(staged_bundle, &destination, &checksum, size)?;
             return Ok((
                 state,
                 Some(Artifact {
@@ -174,7 +190,6 @@ fn create_artifact(
                     format: "git-bundle".to_owned(),
                     format_version: 2,
                 }),
-                outcome.warnings().to_vec(),
             ));
         }
         if attempt == 0 {
@@ -185,113 +200,37 @@ fn create_artifact(
     bail!("repository refs changed while creating the bundle; retry the backup")
 }
 
-/// Directory git-lfs uses to store LFS object content on a hosted (or
-/// restored) bare repository. `git bundle` never captures this, since it
-/// only knows about Git objects, so it must be snapshotted separately.
-fn lfs_objects_dir(repo_path: &Path) -> PathBuf {
-    repo_path.join("lfs").join("objects")
-}
-
 fn create_lfs_artifact(
     repo_path: &Path,
-    snapshots: &Path,
     snapshot_id: &str,
     staged_archive: &Path,
-) -> Result<(Option<Artifact>, Vec<String>)> {
-    let lfs_objects = lfs_objects_dir(repo_path);
-    let files: Vec<PathBuf> = if lfs_objects.is_dir() {
-        walk_files(&lfs_objects)?
-    } else {
-        Vec::new()
-    };
-    if files.is_empty() {
-        return Ok((None, Vec::new()));
+    expected_state: &RefState,
+) -> Result<Option<Artifact>> {
+    if git::ref_state(repo_path)? != *expected_state {
+        bail!("repository refs changed before LFS validation; retry the backup");
     }
-    for path in &files {
-        verify_lfs_object(path)?;
+    if !lfs::create_archive(repo_path, staged_archive)? {
+        return Ok(None);
     }
-
-    if staged_archive.exists() {
-        fs::remove_file(staged_archive)
-            .with_context(|| format!("could not remove stale {}", staged_archive.display()))?;
-    }
-    {
-        let file = File::create(staged_archive)
-            .with_context(|| format!("could not create {}", staged_archive.display()))?;
-        let mut builder = tar::Builder::new(file);
-        builder
-            .append_dir_all(".", &lfs_objects)
-            .with_context(|| format!("could not archive {}", lfs_objects.display()))?;
-        builder
-            .into_inner()
-            .with_context(|| format!("could not finish archive {}", staged_archive.display()))?;
+    if git::ref_state(repo_path)? != *expected_state {
+        bail!("repository refs changed while creating the LFS archive; retry the backup");
     }
 
     let (checksum, size) = storage::checksum(staged_archive)?;
     let file_name = format!("{snapshot_id}.lfs.tar");
-    let destination = snapshots.join(&file_name);
-    let outcome = FsSnapshotStore.publish_file(staged_archive, &destination, &checksum, size)?;
-    Ok((
-        Some(Artifact {
-            key: format!("snapshots/{file_name}"),
-            size,
-            checksum,
-            format: "lfs-archive".to_owned(),
-            format_version: 1,
-        }),
-        outcome.warnings().to_vec(),
-    ))
+    Ok(Some(Artifact {
+        key: format!("snapshots/{file_name}"),
+        size,
+        checksum,
+        format: "lfs-archive".to_owned(),
+        format_version: 1,
+    }))
 }
 
-/// LFS object files are named after their own content hash (`sha256:<oid>`
-/// is the filename), regardless of the two levels of shard directories they
-/// sit under. Recomputing and comparing the hash catches local corruption
-/// before it is durably archived (or, on restore, right after extraction).
-fn verify_lfs_object(path: &Path) -> Result<()> {
-    let oid = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .with_context(|| format!("LFS object path is not valid UTF-8: {}", path.display()))?;
-    let (actual, _) = storage::checksum(path)?;
-    let expected = format!("sha256:{oid}");
-    if actual != expected {
-        bail!(
-            "LFS object {} is corrupt: content hash does not match its object id",
-            path.display()
-        );
+fn cleanup_uncommitted(paths: &[std::path::PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
     }
-    Ok(())
-}
-
-/// Verifies every object under an `lfs/objects` directory (if it exists)
-/// against its own filename-derived content hash. Used both before
-/// archiving a snapshot and after extracting one during restore.
-pub fn verify_lfs_objects(dir: &Path) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for path in walk_files(dir)? {
-        verify_lfs_object(&path)?;
-    }
-    Ok(())
-}
-
-fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current)
-            .with_context(|| format!("could not read directory {}", current.display()))?
-        {
-            let path = entry?.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                files.push(path);
-            }
-        }
-    }
-    Ok(files)
 }
 
 fn next_generation(snapshots: &Path) -> Result<u64> {
@@ -348,6 +287,7 @@ fn repository_name(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::process::Command;
     use std::sync::{Arc, Barrier};
 
