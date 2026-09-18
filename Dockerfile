@@ -18,8 +18,13 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --create-home --home-dir /var/lib/refuge refuge
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 10001 refuge \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/refuge refuge \
+    && install --directory --mode 0750 --owner refuge --group refuge /var/lib/refuge \
+    && test "$(stat --format '%u:%g' /var/lib/refuge)" = "10001:10001" \
+    && test -z "$(find /var/lib/refuge -mindepth 1 -maxdepth 1 -print -quit)"
 
 COPY --from=rust-builder /build/refuge/target/release/refuge /usr/local/bin/refuge
 
