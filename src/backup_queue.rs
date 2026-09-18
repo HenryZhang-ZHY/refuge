@@ -9,28 +9,28 @@ use crate::config::Config;
 use crate::discovery::ProtectionState;
 use crate::{backup, git, repo};
 
-pub fn enqueue(config: &Config, repository: &Path, data_root: &Path) -> Result<()> {
+pub fn enqueue(config: &Config, repository: &Path, store_root: &Path) -> Result<()> {
     let id = Uuid::parse_str(&git::config_get(repository, "refuge.repoid")?)
         .context("repository has an invalid refuge.repoid")?;
-    enqueue_id(config, id, data_root)
+    enqueue_id(config, id, store_root)
 }
 
-pub fn reconcile(config: &Config, data_root: &Path) -> Result<()> {
+pub fn reconcile(config: &Config, store_root: &Path) -> Result<()> {
     for repository in repo::list(config)? {
         if !matches!(
             crate::discovery::repository_status(config, &repository)?,
             ProtectionState::Protected { .. }
         ) {
-            enqueue_id(config, repository.id, data_root)?;
+            enqueue_id(config, repository.id, store_root)?;
         }
     }
     Ok(())
 }
 
-pub fn process_once(config: &Config, data_root: &Path) -> Result<()> {
-    let spool = spool_dir(data_root);
-    std::fs::create_dir_all(&spool)?;
-    for entry in std::fs::read_dir(&spool)? {
+pub fn process_once(config: &Config, store_root: &Path) -> Result<()> {
+    let queue = queue_dir(store_root);
+    std::fs::create_dir_all(&queue)?;
+    for entry in std::fs::read_dir(&queue)? {
         let path = entry?.path();
         if path.extension().and_then(|value| value.to_str()) != Some("job") {
             continue;
@@ -42,12 +42,12 @@ pub fn process_once(config: &Config, data_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn enqueue_id(_config: &Config, id: Uuid, data_root: &Path) -> Result<()> {
-    let spool = spool_dir(data_root);
-    std::fs::create_dir_all(&spool)
-        .with_context(|| format!("could not create backup spool {}", spool.display()))?;
-    let _lock = lock_job(&spool, id)?;
-    let marker = spool.join(format!("{id}.job"));
+fn enqueue_id(_config: &Config, id: Uuid, store_root: &Path) -> Result<()> {
+    let queue = queue_dir(store_root);
+    std::fs::create_dir_all(&queue)
+        .with_context(|| format!("could not create backup queue {}", queue.display()))?;
+    let _lock = lock_job(&queue, id)?;
+    let marker = queue.join(format!("{id}.job"));
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -56,7 +56,7 @@ fn enqueue_id(_config: &Config, id: Uuid, data_root: &Path) -> Result<()> {
         .with_context(|| format!("could not write backup job {}", marker.display()))?;
     writeln!(file, "{}", Uuid::now_v7())?;
     file.sync_all()?;
-    sync_directory(&spool)?;
+    sync_directory(&queue)?;
     Ok(())
 }
 
@@ -66,28 +66,28 @@ fn process_job(config: &Config, marker: &Path) -> Result<()> {
         .and_then(|value| value.to_str())
         .context("backup job has an invalid filename")?;
     let id = Uuid::parse_str(id).context("backup job has an invalid repository id")?;
-    let spool = marker.parent().context("backup job has no parent")?;
+    let queue = marker.parent().context("backup job has no parent")?;
     let token = {
-        let _lock = lock_job(spool, id)?;
+        let _lock = lock_job(queue, id)?;
         std::fs::read(marker).with_context(|| format!("could not read {}", marker.display()))?
     };
     let repository = repo::resolve(config, &id.to_string())?;
     backup::backup_path(config, &repository.path)?;
 
-    let _lock = lock_job(spool, id)?;
+    let _lock = lock_job(queue, id)?;
     if std::fs::read(marker).ok().as_deref() == Some(token.as_slice()) {
         std::fs::remove_file(marker)?;
-        sync_directory(spool)?;
+        sync_directory(queue)?;
     }
     Ok(())
 }
 
-fn spool_dir(data_root: &Path) -> PathBuf {
-    data_root.join("spool")
+fn queue_dir(store_root: &Path) -> PathBuf {
+    store_root.join("queue")
 }
 
-fn lock_job(spool: &Path, id: Uuid) -> Result<std::fs::File> {
-    let path = spool.join(format!("{id}.lock"));
+fn lock_job(queue: &Path, id: Uuid) -> Result<std::fs::File> {
+    let path = queue.join(format!("{id}.lock"));
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)

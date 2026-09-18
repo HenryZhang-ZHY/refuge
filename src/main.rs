@@ -37,12 +37,9 @@ enum Commands {
     Version,
     /// Start the persistent HTTP server, bootstrapping its data directory when needed.
     Serve {
-        /// Persistent server data directory.
-        #[arg(value_name = "DATA_DIR")]
-        data: PathBuf,
-        /// Filesystem or NAS directory that receives immutable backups. Required on first start.
-        #[arg(long, value_name = "BACKUP_DIR")]
-        target: Option<PathBuf>,
+        /// Self-contained persistent store for repositories, backups, queue, and credentials.
+        #[arg(value_name = "STORE_DIR")]
+        store: PathBuf,
         /// HTTP listen address.
         #[arg(long, default_value = "127.0.0.1:7788", value_name = "ADDRESS")]
         listen: SocketAddr,
@@ -232,13 +229,8 @@ fn run() -> Result<()> {
             println!("refuge version {version}");
             println!("{}/releases/tag/v{version}", env!("CARGO_PKG_REPOSITORY"));
         }
-        Commands::Serve {
-            data,
-            target,
-            listen,
-        } => refuge::server::serve(refuge::server::ServeOptions {
-            data_root: data,
-            target_root: target,
+        Commands::Serve { store, listen } => refuge::server::serve(refuge::server::ServeOptions {
+            store_root: store,
             listen,
         })?,
         Commands::Init { repos, target } => {
@@ -433,15 +425,20 @@ fn run() -> Result<()> {
         Commands::Hook {
             command: HookCommands::PostReceive,
         } => {
-            let result = refuge::config::Config::load().and_then(|config| {
-                let path = std::env::current_dir()?;
-                if let Some(data_root) = std::env::var_os("REFUGE_SERVER_DATA") {
-                    refuge::backup_queue::enqueue(&config, &path, &PathBuf::from(data_root))?;
-                    Ok(None)
-                } else {
-                    refuge::backup::backup_path(&config, &path).map(Some)
-                }
-            });
+            let server_store = std::env::var_os("REFUGE_SERVER_STORE").map(PathBuf::from);
+            let result = server_store
+                .as_deref()
+                .map(refuge::server::load_store_config)
+                .unwrap_or_else(refuge::config::Config::load)
+                .and_then(|config| {
+                    let path = std::env::current_dir()?;
+                    if let Some(store_root) = server_store {
+                        refuge::backup_queue::enqueue(&config, &path, &store_root)?;
+                        Ok(None)
+                    } else {
+                        refuge::backup::backup_path(&config, &path).map(Some)
+                    }
+                });
             match result {
                 Ok(Some(outcome)) => print_backup_outcome(&outcome),
                 Ok(None) => println!("backup queued"),

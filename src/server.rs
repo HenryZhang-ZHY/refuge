@@ -28,8 +28,7 @@ use crate::config::Config;
 use crate::discovery::ProtectionState;
 
 pub struct ServeOptions {
-    pub data_root: PathBuf,
-    pub target_root: Option<PathBuf>,
+    pub store_root: PathBuf,
     pub listen: SocketAddr,
 }
 
@@ -42,7 +41,7 @@ struct ServerLayout {
 #[derive(Clone)]
 struct AppState {
     config: Config,
-    config_path: PathBuf,
+    store_root: PathBuf,
     secret: Arc<[u8]>,
     session_token: Arc<str>,
 }
@@ -56,6 +55,12 @@ struct Health<'a> {
 struct ServerInfo {
     pid: u32,
     address: SocketAddr,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoreMetadata {
+    schema_version: u32,
+    instance_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -155,8 +160,8 @@ pub fn serve(options: ServeOptions) -> Result<()> {
 }
 
 async fn serve_async(options: ServeOptions) -> Result<()> {
-    let layout = ServerLayout::open(&options.data_root, options.target_root.as_deref())?;
-    let secret = load_secret()?;
+    let layout = ServerLayout::open(&options.store_root)?;
+    let secret = load_secret(&layout.root)?;
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
         .with_context(|| format!("could not listen on {}", options.listen))?;
@@ -164,7 +169,7 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
     layout.write_server_info(address)?;
     let state = AppState {
         config: layout.config.clone(),
-        config_path: layout.root.join("config.toml"),
+        store_root: layout.root.clone(),
         session_token: session_token(&secret).into(),
         secret,
     };
@@ -242,7 +247,7 @@ async fn web_asset(request: Request) -> Response {
 }
 
 impl ServerLayout {
-    fn open(root: &Path, requested_target: Option<&Path>) -> Result<Self> {
+    fn open(root: &Path) -> Result<Self> {
         let root = std::path::absolute(root)
             .with_context(|| format!("could not resolve server data root {}", root.display()))?;
         std::fs::create_dir_all(&root)
@@ -264,43 +269,8 @@ impl ServerLayout {
             ))
         })?;
 
-        let config_path = root.join("config.toml");
-        let repos = root.join("repos");
-        let config = if config_path.exists() {
-            let config = Config::load_from(&config_path)?;
-            let expected_repos = resolved_directory(&repos)?;
-            if config.repos_dir != expected_repos {
-                bail!(
-                    "server configuration repository directory is {}, expected {}",
-                    config.repos_dir.display(),
-                    expected_repos.display()
-                );
-            }
-            if let Some(target) = requested_target {
-                let target = resolved_directory(target)?;
-                if config.target_root != target {
-                    bail!(
-                        "server is already configured with backup target {}; refusing {}",
-                        config.target_root.display(),
-                        target.display()
-                    );
-                }
-            }
-            config
-        } else {
-            let target = requested_target.context(
-                "--target is required the first time this server data directory is used",
-            )?;
-            let repos = resolved_directory(&repos)?;
-            let target = resolved_directory(target)?;
-            let config = Config {
-                repos_dir: repos,
-                target_root: target,
-                instance_id: Uuid::now_v7(),
-            };
-            config.save_to(&config_path)?;
-            config
-        };
+        initialize_store(&root)?;
+        let config = load_store_config(&root)?;
 
         Ok(Self {
             root,
@@ -321,6 +291,56 @@ impl ServerLayout {
     }
 }
 
+fn initialize_store(root: &Path) -> Result<()> {
+    resolved_directory(&root.join("repos"))?;
+    resolved_directory(&root.join("backups"))?;
+    resolved_directory(&root.join("queue"))?;
+    resolved_directory(&root.join("secrets"))?;
+
+    let metadata_path = root.join("store.toml");
+    if metadata_path.exists() {
+        return Ok(());
+    }
+    let metadata = StoreMetadata {
+        schema_version: 1,
+        instance_id: Uuid::now_v7(),
+    };
+    let text = toml::to_string_pretty(&metadata).context("could not serialize store metadata")?;
+    let mut partial = tempfile::Builder::new()
+        .prefix(".refuge-store-")
+        .tempfile_in(root)
+        .with_context(|| format!("could not stage store metadata in {}", root.display()))?;
+    partial.write_all(text.as_bytes())?;
+    partial.as_file().sync_all()?;
+    partial.persist_noclobber(&metadata_path).map_err(|error| {
+        anyhow::anyhow!(error.error)
+            .context(format!("could not create {}", metadata_path.display()))
+    })?;
+    sync_directory(root)?;
+    Ok(())
+}
+
+pub fn load_store_config(root: &Path) -> Result<Config> {
+    let root = dunce::canonicalize(root)
+        .with_context(|| format!("could not resolve Refuge store {}", root.display()))?;
+    let metadata_path = root.join("store.toml");
+    let text = std::fs::read_to_string(&metadata_path)
+        .with_context(|| format!("could not read {}", metadata_path.display()))?;
+    let metadata: StoreMetadata =
+        toml::from_str(&text).with_context(|| format!("invalid {}", metadata_path.display()))?;
+    if metadata.schema_version != 1 {
+        bail!(
+            "unsupported Refuge store schema version {}",
+            metadata.schema_version
+        );
+    }
+    Ok(Config {
+        repos_dir: resolved_existing_directory(&root.join("repos"))?,
+        target_root: resolved_existing_directory(&root.join("backups"))?,
+        instance_id: metadata.instance_id,
+    })
+}
+
 fn resolved_directory(path: &Path) -> Result<PathBuf> {
     let path = std::path::absolute(path)
         .with_context(|| format!("could not resolve {}", path.display()))?;
@@ -329,23 +349,35 @@ fn resolved_directory(path: &Path) -> Result<PathBuf> {
     dunce::canonicalize(&path).with_context(|| format!("could not resolve {}", path.display()))
 }
 
-fn load_secret() -> Result<Arc<[u8]>> {
-    let secret = if let Some(path) = std::env::var_os("REFUGE_SECRET_FILE") {
-        let path = PathBuf::from(path);
-        let mut bytes = std::fs::read(&path)
-            .with_context(|| format!("could not read REFUGE_SECRET_FILE {}", path.display()))?;
-        while bytes
-            .last()
-            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
-        {
-            bytes.pop();
-        }
-        bytes
-    } else if let Some(secret) = std::env::var_os("REFUGE_SECRET") {
-        secret.to_string_lossy().as_bytes().to_vec()
-    } else {
-        bail!("set REFUGE_SECRET_FILE (recommended) or REFUGE_SECRET before starting the server");
-    };
+fn resolved_existing_directory(path: &Path) -> Result<PathBuf> {
+    dunce::canonicalize(path).with_context(|| format!("could not resolve {}", path.display()))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn load_secret(store_root: &Path) -> Result<Arc<[u8]>> {
+    let path = store_root.join("secrets/owner-secret");
+    let mut secret = std::fs::read(&path).with_context(|| {
+        format!(
+            "could not read {}; create it with at least 16 bytes before starting Refuge",
+            path.display()
+        )
+    })?;
+    while secret
+        .last()
+        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+    {
+        secret.pop();
+    }
     if secret.len() < 16 {
         bail!("the Refuge server secret must contain at least 16 bytes");
     }
@@ -709,11 +741,7 @@ async fn git_http(State(state): State<AppState>, request: Request) -> Result<Res
         .env("QUERY_STRING", parts.uri.query().unwrap_or_default())
         .env("REMOTE_USER", "refuge")
         .env("REMOTE_ADDR", "unknown")
-        .env("REFUGE_CONFIG", &state.config_path)
-        .env(
-            "REFUGE_SERVER_DATA",
-            state.config_path.parent().unwrap_or(Path::new(".")),
-        )
+        .env("REFUGE_SERVER_STORE", &state.store_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -930,13 +958,13 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn spawn_backup_worker(config: Config, data_root: PathBuf) {
+fn spawn_backup_worker(config: Config, store_root: PathBuf) {
     tokio::spawn(async move {
         loop {
             let config = config.clone();
-            let data_root = data_root.clone();
+            let store_root = store_root.clone();
             match tokio::task::spawn_blocking(move || {
-                crate::backup_queue::process_once(&config, &data_root)
+                crate::backup_queue::process_once(&config, &store_root)
             })
             .await
             {

@@ -7,19 +7,24 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 
-fn start_server(data: &std::path::Path, target: Option<&std::path::Path>) -> std::process::Child {
+const OWNER_SECRET: &str = "test-owner-key-0123456789";
+
+fn prepare_store(store: &std::path::Path) {
+    let secrets = store.join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    std::fs::write(secrets.join("owner-secret"), OWNER_SECRET).unwrap();
+}
+
+fn start_server(store: &std::path::Path) -> std::process::Child {
+    prepare_store(store);
     let mut command = Command::new(cargo_bin!("refuge"));
     command
         .arg("serve")
-        .arg(data)
+        .arg(store)
         .args(["--listen", "127.0.0.1:0"])
-        .env("REFUGE_SECRET", "test-owner-key-0123456789")
         .env("PATH", support::path_with_refuge())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(target) = target {
-        command.arg("--target").arg(target);
-    }
     command.spawn().expect("start refuge serve")
 }
 
@@ -85,9 +90,8 @@ fn stop(mut child: std::process::Child) {
 #[test]
 fn serve_bootstraps_persistent_state_and_health_endpoint() {
     let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let target = temp.path().join("backup");
-    let mut server = start_server(&data, Some(&target));
+    let store = temp.path().join("store");
+    let mut server = start_server(&store);
     let server_address = address(&mut server);
 
     let response = request(
@@ -100,9 +104,9 @@ fn serve_bootstraps_persistent_state_and_health_endpoint() {
         response.contains("\r\n\r\n{\"status\":\"ok\"}"),
         "{response}"
     );
-    assert!(data.join("config.toml").is_file());
-    assert!(data.join("repos").is_dir());
-    assert!(target.is_dir());
+    assert!(store.join("store.toml").is_file());
+    assert!(store.join("repos").is_dir());
+    assert!(store.join("backups").is_dir());
     let web = request(
         &server_address,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -111,24 +115,45 @@ fn serve_bootstraps_persistent_state_and_health_endpoint() {
     assert!(web.contains("<title>Refuge</title>"), "{web}");
     stop(server);
 
-    let mut restarted = start_server(&data, None);
+    let moved_store = temp.path().join("moved-store");
+    std::fs::rename(&store, &moved_store).unwrap();
+    let mut restarted = start_server(&moved_store);
     let _ = address(&mut restarted);
     stop(restarted);
 }
 
 #[test]
+fn serve_requires_the_owner_secret_inside_the_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = temp.path().join("store");
+
+    let output = Command::new(cargo_bin!("refuge"))
+        .arg("serve")
+        .arg(&store)
+        .args(["--listen", "127.0.0.1:0"])
+        .env("REFUGE_SECRET", OWNER_SECRET)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("secrets/owner-secret"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn serve_refuses_a_second_process_for_the_same_data_root() {
     let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let target = temp.path().join("backup");
-    let mut first = start_server(&data, Some(&target));
+    let store = temp.path().join("store");
+    let mut first = start_server(&store);
     let _ = address(&mut first);
 
     let output = Command::new(cargo_bin!("refuge"))
         .arg("serve")
-        .arg(&data)
+        .arg(&store)
         .args(["--listen", "127.0.0.1:0"])
-        .env("REFUGE_SECRET", "test-owner-key-0123456789")
         .output()
         .unwrap();
 
@@ -144,9 +169,8 @@ fn serve_refuses_a_second_process_for_the_same_data_root() {
 #[test]
 fn repository_api_requires_the_owner_secret_and_creates_repositories() {
     let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let target = temp.path().join("backup");
-    let mut server = start_server(&data, Some(&target));
+    let store = temp.path().join("store");
+    let mut server = start_server(&store);
     let address = address(&mut server);
 
     let unauthorized = request(
@@ -178,16 +202,15 @@ fn repository_api_requires_the_owner_secret_and_creates_repositories() {
     );
     assert!(listed.starts_with("HTTP/1.1 200 OK"), "{listed}");
     assert!(listed.contains("\"name\":\"notes\""), "{listed}");
-    assert!(data.join("repos/notes.git").is_dir());
+    assert!(store.join("repos/notes.git").is_dir());
     stop(server);
 }
 
 #[test]
 fn web_session_reuses_the_owner_secret_without_returning_it_to_javascript() {
     let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let target = temp.path().join("backup");
-    let mut server = start_server(&data, Some(&target));
+    let store = temp.path().join("store");
+    let mut server = start_server(&store);
     let address = address(&mut server);
     let body = br#"{"secret":"test-owner-key-0123456789"}"#;
     let login = request(
@@ -226,9 +249,8 @@ fn web_session_reuses_the_owner_secret_without_returning_it_to_javascript() {
 #[test]
 fn standard_git_clients_clone_push_and_fetch_over_http() {
     let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let target = temp.path().join("backup");
-    let mut server = start_server(&data, Some(&target));
+    let store = temp.path().join("store");
+    let mut server = start_server(&store);
     let address = address(&mut server);
     let body = br#"{"name":"notes"}"#;
     let create = format!(
@@ -283,9 +305,9 @@ fn standard_git_clients_clone_push_and_fetch_over_http() {
 #[test]
 fn server_push_is_accepted_while_backup_is_pending_and_retries_automatically() {
     let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let target = temp.path().join("backup");
-    let mut server = start_server(&data, Some(&target));
+    let store = temp.path().join("store");
+    let target = store.join("backups");
+    let mut server = start_server(&store);
     let address = address(&mut server);
     create_repository(&address, "offline");
 
@@ -348,9 +370,9 @@ fn server_push_is_accepted_while_backup_is_pending_and_retries_automatically() {
 #[test]
 fn standard_git_lfs_clients_upload_and_download_over_http() {
     let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let target = temp.path().join("backup");
-    let mut server = start_server(&data, Some(&target));
+    let store = temp.path().join("store");
+    let target = store.join("backups");
+    let mut server = start_server(&store);
     let address = address(&mut server);
     create_repository(&address, "media");
     let remote = format!("http://refuge:test-owner-key-0123456789@{address}/git/media.git");
