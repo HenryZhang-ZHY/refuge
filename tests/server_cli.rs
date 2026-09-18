@@ -144,6 +144,28 @@ fn serve_requires_the_owner_secret_inside_the_store() {
 }
 
 #[test]
+fn serve_rejects_a_legacy_backup_directory_as_a_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = temp.path().join("store");
+    prepare_store(&store);
+    std::fs::create_dir_all(store.join("refuge/v1/repos")).unwrap();
+
+    let output = Command::new(cargo_bin!("refuge"))
+        .arg("serve")
+        .arg(&store)
+        .args(["--listen", "127.0.0.1:0"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("use an empty directory"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn serve_refuses_a_second_process_for_the_same_data_root() {
     let temp = tempfile::tempdir().unwrap();
     let store = temp.path().join("store");

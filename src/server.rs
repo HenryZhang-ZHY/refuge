@@ -292,12 +292,16 @@ impl ServerLayout {
 }
 
 fn initialize_store(root: &Path) -> Result<()> {
+    let metadata_path = root.join("store.toml");
+    if !metadata_path.exists() {
+        reject_nonempty_uninitialized_store(root)?;
+    }
+
     resolved_directory(&root.join("repos"))?;
     resolved_directory(&root.join("backups"))?;
     resolved_directory(&root.join("queue"))?;
     resolved_directory(&root.join("secrets"))?;
 
-    let metadata_path = root.join("store.toml");
     if metadata_path.exists() {
         return Ok(());
     }
@@ -317,6 +321,21 @@ fn initialize_store(root: &Path) -> Result<()> {
             .context(format!("could not create {}", metadata_path.display()))
     })?;
     sync_directory(root)?;
+    Ok(())
+}
+
+fn reject_nonempty_uninitialized_store(root: &Path) -> Result<()> {
+    let unexpected = std::fs::read_dir(root)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name())
+        .find(|name| name != ".refuge-serve.lock" && name != "secrets");
+    if let Some(name) = unexpected {
+        bail!(
+            "{} is not an initialized Refuge store and contains unexpected entry {}; use an empty directory",
+            root.display(),
+            name.to_string_lossy()
+        );
+    }
     Ok(())
 }
 
