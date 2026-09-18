@@ -5,5 +5,13 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:7788:7788"
+    environment:
+      REFUGE_SECRET_FILE: /run/secrets/refuge-secret
     volumes:
       - ./refuge-store:/var/lib/refuge
+    secrets:
+      - refuge-secret
+
+secrets:
+  refuge-secret:
+    file: ./refuge-secret.txt

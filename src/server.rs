@@ -161,7 +161,7 @@ pub fn serve(options: ServeOptions) -> Result<()> {
 
 async fn serve_async(options: ServeOptions) -> Result<()> {
     let layout = ServerLayout::open(&options.store_root)?;
-    let secret = load_secret(&layout.root)?;
+    let secret = load_secret()?;
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
         .with_context(|| format!("could not listen on {}", options.listen))?;
@@ -300,7 +300,6 @@ fn initialize_store(root: &Path) -> Result<()> {
     resolved_directory(&root.join("repos"))?;
     resolved_directory(&root.join("backups"))?;
     resolved_directory(&root.join("queue"))?;
-    resolved_directory(&root.join("secrets"))?;
 
     if metadata_path.exists() {
         return Ok(());
@@ -328,7 +327,7 @@ fn reject_nonempty_uninitialized_store(root: &Path) -> Result<()> {
     let unexpected = std::fs::read_dir(root)?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name())
-        .find(|name| name != ".refuge-serve.lock" && name != "secrets");
+        .find(|name| name != ".refuge-serve.lock");
     if let Some(name) = unexpected {
         bail!(
             "{} is not an initialized Refuge store and contains unexpected entry {}; use an empty directory",
@@ -383,20 +382,23 @@ fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn load_secret(store_root: &Path) -> Result<Arc<[u8]>> {
-    let path = store_root.join("secrets/owner-secret");
-    let mut secret = std::fs::read(&path).with_context(|| {
-        format!(
-            "could not read {}; create it with at least 16 bytes before starting Refuge",
-            path.display()
-        )
-    })?;
-    while secret
-        .last()
-        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
-    {
-        secret.pop();
-    }
+fn load_secret() -> Result<Arc<[u8]>> {
+    let secret = if let Some(path) = std::env::var_os("REFUGE_SECRET_FILE") {
+        let path = PathBuf::from(path);
+        let mut bytes = std::fs::read(&path)
+            .with_context(|| format!("could not read REFUGE_SECRET_FILE {}", path.display()))?;
+        while bytes
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            bytes.pop();
+        }
+        bytes
+    } else if let Some(secret) = std::env::var_os("REFUGE_SECRET") {
+        secret.to_string_lossy().as_bytes().to_vec()
+    } else {
+        bail!("set REFUGE_SECRET_FILE (recommended) or REFUGE_SECRET before starting the server");
+    };
     if secret.len() < 16 {
         bail!("the Refuge server secret must contain at least 16 bytes");
     }

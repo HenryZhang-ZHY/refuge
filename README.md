@@ -34,13 +34,12 @@ It exposes standard Git Smart HTTP and Git LFS endpoints; client machines need
 only `git` and, for LFS repositories, `git-lfs`. There is no Refuge-specific Git
 transport.
 
-Create the self-contained store and its fixed owner key, then start the included
-Compose stack:
+Create the store and a fixed owner key, then start the included Compose stack:
 
 ```sh
-install -d -m 700 refuge-store/secrets
-openssl rand -hex 32 > refuge-store/secrets/owner-secret
-chmod 600 refuge-store/secrets/owner-secret
+install -d -m 700 refuge-store
+openssl rand -hex 32 > refuge-secret.txt
+chmod 600 refuge-secret.txt
 chown -R 10001:10001 refuge-store
 docker compose up --build -d
 ```
@@ -59,10 +58,10 @@ in browser local storage.
 
 The image has exactly one persistence boundary: `/var/lib/refuge`. The supplied
 Compose file bind-mounts `./refuge-store` there. That store contains its identity,
-owner key, live repositories, durable backup queue, and verified immutable
-snapshots under `backups/`. Moving or restoring the directory and mounting it at
-the same container path restores the complete server. UID 10001 must be able to
-read and write the store.
+live repositories, durable backup queue, and verified immutable snapshots under
+`backups/`. Moving or restoring the directory and mounting it at the same
+container path restores the server data. UID 10001 must be able to read and
+write the store.
 
 The store layout is:
 
@@ -71,14 +70,12 @@ refuge-store/
 ├── store.toml
 ├── repos/
 ├── queue/
-├── backups/
-└── secrets/
-    └── owner-secret
+└── backups/
 ```
 
-The server intentionally ignores `REFUGE_SECRET` and `REFUGE_SECRET_FILE`; its
-credential belongs to the store. Protect and encrypt copies of the entire store
-because they contain both repository data and the owner credential.
+The owner key remains a deployment secret rather than repository data. Preserve
+it independently in a password manager or secret manager; it does not belong in
+the synchronized Store directory.
 
 The default port mapping is loopback-only. Put Caddy, Tailscale Serve, or
 another TLS terminator in front before exposing the service to other machines.

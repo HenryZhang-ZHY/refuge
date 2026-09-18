@@ -37,7 +37,7 @@ enum Commands {
     Version,
     /// Start the persistent HTTP server, bootstrapping its data directory when needed.
     Serve {
-        /// Self-contained persistent store for repositories, backups, queue, and credentials.
+        /// Persistent store for repositories, backups, queue, and instance metadata.
         #[arg(value_name = "STORE_DIR")]
         store: PathBuf,
         /// HTTP listen address.

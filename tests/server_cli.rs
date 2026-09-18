@@ -9,19 +9,13 @@ use assert_cmd::cargo::cargo_bin;
 
 const OWNER_SECRET: &str = "test-owner-key-0123456789";
 
-fn prepare_store(store: &std::path::Path) {
-    let secrets = store.join("secrets");
-    std::fs::create_dir_all(&secrets).unwrap();
-    std::fs::write(secrets.join("owner-secret"), OWNER_SECRET).unwrap();
-}
-
 fn start_server(store: &std::path::Path) -> std::process::Child {
-    prepare_store(store);
     let mut command = Command::new(cargo_bin!("refuge"));
     command
         .arg("serve")
         .arg(store)
         .args(["--listen", "127.0.0.1:0"])
+        .env("REFUGE_SECRET", OWNER_SECRET)
         .env("PATH", support::path_with_refuge())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -123,7 +117,7 @@ fn serve_bootstraps_persistent_state_and_health_endpoint() {
 }
 
 #[test]
-fn serve_requires_the_owner_secret_inside_the_store() {
+fn serve_requires_an_injected_owner_secret() {
     let temp = tempfile::tempdir().unwrap();
     let store = temp.path().join("store");
 
@@ -131,13 +125,12 @@ fn serve_requires_the_owner_secret_inside_the_store() {
         .arg("serve")
         .arg(&store)
         .args(["--listen", "127.0.0.1:0"])
-        .env("REFUGE_SECRET", OWNER_SECRET)
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("secrets/owner-secret"),
+        String::from_utf8_lossy(&output.stderr).contains("REFUGE_SECRET_FILE"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -147,13 +140,13 @@ fn serve_requires_the_owner_secret_inside_the_store() {
 fn serve_rejects_a_legacy_backup_directory_as_a_store() {
     let temp = tempfile::tempdir().unwrap();
     let store = temp.path().join("store");
-    prepare_store(&store);
     std::fs::create_dir_all(store.join("refuge/v1/repos")).unwrap();
 
     let output = Command::new(cargo_bin!("refuge"))
         .arg("serve")
         .arg(&store)
         .args(["--listen", "127.0.0.1:0"])
+        .env("REFUGE_SECRET", OWNER_SECRET)
         .output()
         .unwrap();
 
