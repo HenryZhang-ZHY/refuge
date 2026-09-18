@@ -9,6 +9,13 @@ depends_on:
 
 # Refuge Implementation Plan
 
+This is an aspirational long-term reference, not the current crate layout or
+the next execution sequence. The implemented single-crate architecture and
+correctness-first order are defined by
+`2026-09-18-refactoring-plan.md`; introduce a daemon, queue, or SQLite only by
+calling the existing application backup use cases and treating durable retry
+and reconciliation as new behavior rather than a directory reorganization.
+
 Language: Rust (stable, edition 2024). Runtime dependency: `git` 2.40 or newer on `PATH`.
 First-release targets: Windows 11 x86_64 (local-first), Linux x86_64 (server mode).
 

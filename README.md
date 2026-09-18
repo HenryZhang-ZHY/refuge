@@ -168,8 +168,10 @@ the LFS byte count when present.
 ## Notes
 
 - Repository names may contain letters, digits, dots, dashes, and underscores.
-- The `--repos` directory must never live inside a cloud-synced folder (e.g.
-  OneDrive); Refuge checks for this and will refuse to initialize otherwise.
+- The `--repos` directory must not live inside the selected backup target.
+  Refuge also rejects paths under OneDrive roots exposed through the current
+  process environment. That detection is a guardrail, not proof that an
+  arbitrary directory is never synchronized; choose a known local-only path.
 - See `docs/product/2026-09-18-refuge-prd.md` for the full product rationale.
 
 ## Development
