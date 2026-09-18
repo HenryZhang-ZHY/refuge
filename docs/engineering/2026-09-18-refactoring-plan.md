@@ -19,14 +19,13 @@ and replacement recovery, shared application provisioning, atomic
 configuration, CI, and a measured performance harness.
 
 Local Linux verification passed formatting, Clippy with warnings denied, 17
-unit tests, 39 ordinary integration tests, and all five first-use BDD scenarios.
-The real Git LFS BDD remains an explicit CI gate but was not runnable in the
-implementation environment because `git-lfs` was absent. Windows CI and actual
-sync-client behavior require a pushed branch/PR and are not established by the
-local run. Process-crash recovery is covered by deterministic state fixtures;
-physical power-loss durability is not claimed. Concurrent native Git pushes do
-not participate in Refuge's replacement locks, so `restore --replace` still
-requires maintenance exclusion from writers.
+unit tests, 39 ordinary integration tests, all five first-use BDD scenarios,
+and the real Git LFS push → backup → clean restore BDD scenario with git-lfs
+3.3.0. Windows CI and actual sync-client behavior require a pushed branch/PR
+and are not established by the local run. Process-crash recovery is covered by
+deterministic state fixtures; physical power-loss durability is not claimed.
+Concurrent native Git pushes do not participate in Refuge's replacement locks,
+so `restore --replace` still requires maintenance exclusion from writers.
 
 ## 1. Recommendation and scope
 
