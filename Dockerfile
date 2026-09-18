@@ -28,4 +28,4 @@ EXPOSE 7788
 USER refuge
 
 ENTRYPOINT ["refuge"]
-CMD ["serve", "/var/lib/refuge", "--listen", "0.0.0.0:7788"]
+CMD ["serve", "--data", "/var/lib/refuge", "--backup", "/var/backups/refuge", "--listen", "0.0.0.0:7788"]

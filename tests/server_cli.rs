@@ -10,10 +10,24 @@ use assert_cmd::cargo::cargo_bin;
 const OWNER_SECRET: &str = "test-owner-key-0123456789";
 
 fn start_server(store: &std::path::Path) -> std::process::Child {
+    start_server_with_backup(store, &backup_for(store))
+}
+
+fn backup_for(runtime: &std::path::Path) -> std::path::PathBuf {
+    runtime.with_extension("backup")
+}
+
+fn start_server_with_backup(
+    runtime: &std::path::Path,
+    backup: &std::path::Path,
+) -> std::process::Child {
     let mut command = Command::new(cargo_bin!("refuge"));
     command
         .arg("serve")
-        .arg(store)
+        .arg("--data")
+        .arg(runtime)
+        .arg("--backup")
+        .arg(backup)
         .args(["--listen", "127.0.0.1:0"])
         .env("REFUGE_SECRET", OWNER_SECRET)
         .env("PATH", support::path_with_refuge())
@@ -98,9 +112,9 @@ fn serve_bootstraps_persistent_state_and_health_endpoint() {
         response.contains("\r\n\r\n{\"status\":\"ok\"}"),
         "{response}"
     );
-    assert!(store.join("store.toml").is_file());
+    assert!(store.join("runtime.toml").is_file());
     assert!(store.join("repos").is_dir());
-    assert!(store.join("backups").is_dir());
+    assert!(backup_for(&store).is_dir());
     let web = request(
         &server_address,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -117,13 +131,88 @@ fn serve_bootstraps_persistent_state_and_health_endpoint() {
 }
 
 #[test]
+fn empty_runtime_is_rebuilt_from_the_portable_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let backup = temp.path().join("backup");
+    let first_runtime = temp.path().join("first-runtime");
+    let mut first = start_server_with_backup(&first_runtime, &backup);
+    let first_address = address(&mut first);
+    create_repository(&first_address, "notes");
+    let first_remote =
+        format!("http://refuge:test-owner-key-0123456789@{first_address}/git/notes.git");
+    let work = temp.path().join("work");
+    assert!(
+        git(
+            temp.path(),
+            &["clone", &first_remote, work.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git(&work, &["config", "user.name", "Refuge Test"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&work, &["config", "user.email", "refuge@example.invalid"])
+            .status
+            .success()
+    );
+    std::fs::write(work.join("README.md"), "restored from backup\n").unwrap();
+    assert!(git(&work, &["add", "README.md"]).status.success());
+    assert!(
+        git(&work, &["commit", "-m", "content to recover"])
+            .status
+            .success()
+    );
+    assert!(git(&work, &["push", "origin", "main"]).status.success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !repository_json(&first_address, "notes").contains("\"protection\":\"protected\"") {
+        assert!(Instant::now() < deadline, "backup did not finish");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    stop(first);
+
+    let second_runtime = temp.path().join("second-runtime");
+    let mut second = start_server_with_backup(&second_runtime, &backup);
+    let second_address = address(&mut second);
+    let listed = request(
+        &second_address,
+        b"GET /api/v1/repos HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-owner-key-0123456789\r\nConnection: close\r\n\r\n",
+    );
+
+    assert!(listed.starts_with("HTTP/1.1 200 OK"), "{listed}");
+    assert!(listed.contains("\"name\":\"notes\""), "{listed}");
+    assert!(second_runtime.join("repos/notes.git").is_dir());
+    let second_remote =
+        format!("http://refuge:test-owner-key-0123456789@{second_address}/git/notes.git");
+    let recovered = temp.path().join("recovered");
+    let clone = git(
+        temp.path(),
+        &["clone", &second_remote, recovered.to_str().unwrap()],
+    );
+    assert!(
+        clone.status.success(),
+        "clone after recovery failed: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(recovered.join("README.md")).unwrap(),
+        "restored from backup\n"
+    );
+    stop(second);
+}
+
+#[test]
 fn serve_requires_an_injected_owner_secret() {
     let temp = tempfile::tempdir().unwrap();
     let store = temp.path().join("store");
 
     let output = Command::new(cargo_bin!("refuge"))
         .arg("serve")
-        .arg(&store)
+        .args(["--data", store.to_str().unwrap()])
+        .args(["--backup", backup_for(&store).to_str().unwrap()])
         .args(["--listen", "127.0.0.1:0"])
         .output()
         .unwrap();
@@ -137,14 +226,15 @@ fn serve_requires_an_injected_owner_secret() {
 }
 
 #[test]
-fn serve_rejects_a_legacy_backup_directory_as_a_store() {
+fn serve_rejects_a_nonempty_uninitialized_runtime() {
     let temp = tempfile::tempdir().unwrap();
     let store = temp.path().join("store");
     std::fs::create_dir_all(store.join("refuge/v1/repos")).unwrap();
 
     let output = Command::new(cargo_bin!("refuge"))
         .arg("serve")
-        .arg(&store)
+        .args(["--data", store.to_str().unwrap()])
+        .args(["--backup", backup_for(&store).to_str().unwrap()])
         .args(["--listen", "127.0.0.1:0"])
         .env("REFUGE_SECRET", OWNER_SECRET)
         .output()
@@ -167,7 +257,8 @@ fn serve_refuses_a_second_process_for_the_same_data_root() {
 
     let output = Command::new(cargo_bin!("refuge"))
         .arg("serve")
-        .arg(&store)
+        .args(["--data", store.to_str().unwrap()])
+        .args(["--backup", backup_for(&store).to_str().unwrap()])
         .args(["--listen", "127.0.0.1:0"])
         .output()
         .unwrap();
@@ -321,7 +412,7 @@ fn standard_git_clients_clone_push_and_fetch_over_http() {
 fn server_push_is_accepted_while_backup_is_pending_and_retries_automatically() {
     let temp = tempfile::tempdir().unwrap();
     let store = temp.path().join("store");
-    let target = store.join("backups");
+    let target = backup_for(&store);
     let mut server = start_server(&store);
     let address = address(&mut server);
     create_repository(&address, "offline");
@@ -386,7 +477,7 @@ fn server_push_is_accepted_while_backup_is_pending_and_retries_automatically() {
 fn standard_git_lfs_clients_upload_and_download_over_http() {
     let temp = tempfile::tempdir().unwrap();
     let store = temp.path().join("store");
-    let target = store.join("backups");
+    let target = backup_for(&store);
     let mut server = start_server(&store);
     let address = address(&mut server);
     create_repository(&address, "media");

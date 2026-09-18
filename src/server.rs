@@ -28,7 +28,8 @@ use crate::config::Config;
 use crate::discovery::ProtectionState;
 
 pub struct ServeOptions {
-    pub store_root: PathBuf,
+    pub runtime_root: PathBuf,
+    pub backup_root: PathBuf,
     pub listen: SocketAddr,
 }
 
@@ -41,7 +42,7 @@ struct ServerLayout {
 #[derive(Clone)]
 struct AppState {
     config: Config,
-    store_root: PathBuf,
+    runtime_root: PathBuf,
     secret: Arc<[u8]>,
     session_token: Arc<str>,
 }
@@ -160,7 +161,8 @@ pub fn serve(options: ServeOptions) -> Result<()> {
 }
 
 async fn serve_async(options: ServeOptions) -> Result<()> {
-    let layout = ServerLayout::open(&options.store_root)?;
+    let layout = ServerLayout::open(&options.runtime_root, &options.backup_root)?;
+    restore_runtime_if_empty(&layout.config)?;
     let secret = load_secret()?;
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
@@ -169,7 +171,7 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
     layout.write_server_info(address)?;
     let state = AppState {
         config: layout.config.clone(),
-        store_root: layout.root.clone(),
+        runtime_root: layout.root.clone(),
         session_token: session_token(&secret).into(),
         secret,
     };
@@ -247,7 +249,7 @@ async fn web_asset(request: Request) -> Response {
 }
 
 impl ServerLayout {
-    fn open(root: &Path) -> Result<Self> {
+    fn open(root: &Path, backup_root: &Path) -> Result<Self> {
         let root = std::path::absolute(root)
             .with_context(|| format!("could not resolve server data root {}", root.display()))?;
         std::fs::create_dir_all(&root)
@@ -269,8 +271,8 @@ impl ServerLayout {
             ))
         })?;
 
-        initialize_store(&root)?;
-        let config = load_store_config(&root)?;
+        initialize_runtime(&root)?;
+        let config = load_server_config(&root, backup_root)?;
 
         Ok(Self {
             root,
@@ -291,14 +293,13 @@ impl ServerLayout {
     }
 }
 
-fn initialize_store(root: &Path) -> Result<()> {
-    let metadata_path = root.join("store.toml");
+fn initialize_runtime(root: &Path) -> Result<()> {
+    let metadata_path = root.join("runtime.toml");
     if !metadata_path.exists() {
         reject_nonempty_uninitialized_store(root)?;
     }
 
     resolved_directory(&root.join("repos"))?;
-    resolved_directory(&root.join("backups"))?;
     resolved_directory(&root.join("queue"))?;
 
     if metadata_path.exists() {
@@ -308,11 +309,11 @@ fn initialize_store(root: &Path) -> Result<()> {
         schema_version: 1,
         instance_id: Uuid::now_v7(),
     };
-    let text = toml::to_string_pretty(&metadata).context("could not serialize store metadata")?;
+    let text = toml::to_string_pretty(&metadata).context("could not serialize runtime metadata")?;
     let mut partial = tempfile::Builder::new()
-        .prefix(".refuge-store-")
+        .prefix(".refuge-runtime-")
         .tempfile_in(root)
-        .with_context(|| format!("could not stage store metadata in {}", root.display()))?;
+        .with_context(|| format!("could not stage runtime metadata in {}", root.display()))?;
     partial.write_all(text.as_bytes())?;
     partial.as_file().sync_all()?;
     partial.persist_noclobber(&metadata_path).map_err(|error| {
@@ -330,7 +331,7 @@ fn reject_nonempty_uninitialized_store(root: &Path) -> Result<()> {
         .find(|name| name != ".refuge-serve.lock");
     if let Some(name) = unexpected {
         bail!(
-            "{} is not an initialized Refuge store and contains unexpected entry {}; use an empty directory",
+            "{} is not an initialized Refuge runtime and contains unexpected entry {}; use an empty directory",
             root.display(),
             name.to_string_lossy()
         );
@@ -338,25 +339,75 @@ fn reject_nonempty_uninitialized_store(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn load_store_config(root: &Path) -> Result<Config> {
+pub fn load_server_config(root: &Path, backup_root: &Path) -> Result<Config> {
     let root = dunce::canonicalize(root)
-        .with_context(|| format!("could not resolve Refuge store {}", root.display()))?;
-    let metadata_path = root.join("store.toml");
+        .with_context(|| format!("could not resolve Refuge runtime {}", root.display()))?;
+    let backup_root = resolved_directory(backup_root)?;
+    if root.starts_with(&backup_root) || backup_root.starts_with(&root) {
+        bail!("Refuge runtime and backup directories must be separate");
+    }
+    let metadata_path = root.join("runtime.toml");
     let text = std::fs::read_to_string(&metadata_path)
         .with_context(|| format!("could not read {}", metadata_path.display()))?;
     let metadata: StoreMetadata =
         toml::from_str(&text).with_context(|| format!("invalid {}", metadata_path.display()))?;
     if metadata.schema_version != 1 {
         bail!(
-            "unsupported Refuge store schema version {}",
+            "unsupported Refuge runtime schema version {}",
             metadata.schema_version
         );
     }
     Ok(Config {
         repos_dir: resolved_existing_directory(&root.join("repos"))?,
-        target_root: resolved_existing_directory(&root.join("backups"))?,
+        target_root: backup_root,
         instance_id: metadata.instance_id,
     })
+}
+
+fn restore_runtime_if_empty(config: &Config) -> Result<()> {
+    if std::fs::read_dir(&config.repos_dir)?.next().is_some() {
+        return Ok(());
+    }
+    let catalog = crate::discovery::list_snapshots(&config.target_root, None)
+        .context("could not inspect the backup directory")?;
+    let mut repositories = catalog
+        .snapshots
+        .iter()
+        .map(|snapshot| snapshot.manifest.repo_id)
+        .collect::<Vec<_>>();
+    repositories.sort_unstable();
+    repositories.dedup();
+
+    if repositories.is_empty() && !catalog.diagnostics.is_empty() {
+        bail!(
+            "the backup directory contains no readable repository snapshots: {}",
+            catalog.diagnostics[0].reason
+        );
+    }
+    for repository_id in repositories {
+        let restored = crate::restore::restore(
+            config,
+            crate::restore::RestoreOptions {
+                selector: &repository_id.to_string(),
+                snapshot_id: None,
+                as_name: None,
+                target: &config.target_root,
+                replace: false,
+            },
+        )
+        .with_context(|| format!("could not restore repository {repository_id} from backup"))?;
+        println!(
+            "restored {} from backup snapshot {}",
+            restored.name, restored.snapshot_id
+        );
+        for warning in restored.warnings {
+            eprintln!(
+                "refuge: warning while restoring {}: {warning}",
+                restored.name
+            );
+        }
+    }
+    Ok(())
 }
 
 fn resolved_directory(path: &Path) -> Result<PathBuf> {
@@ -762,7 +813,8 @@ async fn git_http(State(state): State<AppState>, request: Request) -> Result<Res
         .env("QUERY_STRING", parts.uri.query().unwrap_or_default())
         .env("REMOTE_USER", "refuge")
         .env("REMOTE_ADDR", "unknown")
-        .env("REFUGE_SERVER_STORE", &state.store_root)
+        .env("REFUGE_SERVER_RUNTIME", &state.runtime_root)
+        .env("REFUGE_SERVER_BACKUP", &state.config.target_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());

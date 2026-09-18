@@ -34,13 +34,14 @@ It exposes standard Git Smart HTTP and Git LFS endpoints; client machines need
 only `git` and, for LFS repositories, `git-lfs`. There is no Refuge-specific Git
 transport.
 
-Create the store and a fixed owner key, then start the included Compose stack:
+Create the portable backup directory and a fixed owner key, then start the
+included Compose stack:
 
 ```sh
-install -d -m 700 refuge-store
+install -d -m 700 refuge-backup
 openssl rand -hex 32 > refuge-secret.txt
 chmod 600 refuge-secret.txt
-chown -R 10001:10001 refuge-store
+chown -R 10001:10001 refuge-backup
 docker compose up --build -d
 ```
 
@@ -56,26 +57,38 @@ key as the password. A Git credential helper can store it normally. The key is
 also used by the Web UI to obtain an HttpOnly session cookie and is not stored
 in browser local storage.
 
-The image has exactly one persistence boundary: `/var/lib/refuge`. The supplied
-Compose file bind-mounts `./refuge-store` there. That store contains its identity,
-live repositories, durable backup queue, and verified immutable snapshots under
-`backups/`. Moving or restoring the directory and mounting it at the same
-container path restores the server data. UID 10001 must be able to read and
-write the store.
+Server storage deliberately has two different lifecycles:
 
-The store layout is:
+- `/var/lib/refuge` is local runtime data: live bare repositories, the backup
+  queue, and runtime identity. The supplied Compose file uses a Docker-managed
+  volume so Git repositories have stable container ownership.
+- `/var/backups/refuge` is the portable backup boundary. The supplied Compose
+  file bind-mounts `./refuge-backup` there; this is the only directory that must
+  be synchronized or copied for disaster recovery.
+
+On a new server, mount the preserved backup directory and start Refuge with an
+empty runtime volume. Refuge verifies and restores every repository from its
+newest valid snapshot before accepting traffic. There is no live Git repository
+inside the bind mount, so host/container UID differences cannot trigger Git's
+repository ownership checks. UID 10001 still needs ordinary read/write access
+to the backup directory.
+
+The two layouts are:
 
 ```text
-refuge-store/
-├── store.toml
+Docker volume: /var/lib/refuge/
+├── runtime.toml
 ├── repos/
-├── queue/
-└── backups/
+└── queue/
+
+Portable bind mount: /var/backups/refuge/
+├── .refuge-staging/
+└── refuge/v1/repos/…
 ```
 
 The owner key remains a deployment secret rather than repository data. Preserve
 it independently in a password manager or secret manager; it does not belong in
-the synchronized Store directory.
+the portable backup directory.
 
 The default port mapping is loopback-only. Put Caddy, Tailscale Serve, or
 another TLS terminator in front before exposing the service to other machines.
