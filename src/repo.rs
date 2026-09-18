@@ -12,7 +12,7 @@ pub struct Repository {
 
 pub fn create(config: &Config, name: &str) -> Result<Repository> {
     validate_name(name)?;
-    let path = repo_path(config, name);
+    let path = path_for(config, name);
     if path.exists() {
         bail!("repository already exists: {}", path.display());
     }
@@ -22,7 +22,7 @@ pub fn create(config: &Config, name: &str) -> Result<Repository> {
 
 pub fn import(config: &Config, name: &str, source: &Path) -> Result<Repository> {
     validate_name(name)?;
-    let path = repo_path(config, name);
+    let path = path_for(config, name);
     if path.exists() {
         bail!("repository already exists: {}", path.display());
     }
@@ -30,7 +30,16 @@ pub fn import(config: &Config, name: &str, source: &Path) -> Result<Repository> 
     finish_setup(path)
 }
 
-pub fn repo_path(config: &Config, name: &str) -> PathBuf {
+pub fn find(config: &Config, name: &str) -> Result<PathBuf> {
+    validate_name(name)?;
+    let path = path_for(config, name);
+    if !path.is_dir() {
+        bail!("repository does not exist: {name}");
+    }
+    Ok(path)
+}
+
+fn path_for(config: &Config, name: &str) -> PathBuf {
     config.repos_dir.join(format!("{name}.git"))
 }
 

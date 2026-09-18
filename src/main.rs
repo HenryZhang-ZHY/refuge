@@ -26,6 +26,15 @@ enum Commands {
         #[command(subcommand)]
         command: RepoCommands,
     },
+    /// Create and publish a verified repository snapshot.
+    Backup {
+        /// Hosted repository name.
+        #[arg(required_unless_present = "repo_path", conflicts_with = "repo_path")]
+        name: Option<String>,
+        /// Explicit bare repository path (used by the post-receive hook).
+        #[arg(long)]
+        repo_path: Option<PathBuf>,
+    },
     #[command(hide = true)]
     Hook {
         #[command(subcommand)]
@@ -65,10 +74,44 @@ fn main() -> Result<()> {
                 repository.path.display()
             );
         }
+        Some(Commands::Backup { name, repo_path }) => {
+            let config = refuge::config::Config::load()?;
+            let manifest = match (name, repo_path) {
+                (Some(name), None) => refuge::backup::backup_named(&config, &name)?,
+                (None, Some(path)) => refuge::backup::backup_path(&config, &path)?,
+                _ => unreachable!("clap validates backup arguments"),
+            };
+            print_protected(&manifest);
+        }
         Some(Commands::Hook {
             command: HookCommands::PostReceive,
-        }) => {}
+        }) => {
+            let result = refuge::config::Config::load().and_then(|config| {
+                let path = std::env::current_dir()?;
+                refuge::backup::backup_path(&config, &path)
+            });
+            match result {
+                Ok(manifest) => print_protected(&manifest),
+                Err(error) => eprintln!("refuge: backup failed: {error:#}"),
+            }
+        }
         None => {}
     }
     Ok(())
+}
+
+fn print_protected(manifest: &refuge::manifest::Manifest) {
+    let size = manifest
+        .artifact
+        .as_ref()
+        .map(|artifact| artifact.size)
+        .unwrap_or(0);
+    let ref_count = manifest
+        .refs
+        .len()
+        .saturating_sub(usize::from(manifest.head().is_some()));
+    println!(
+        "protected {} {} refs {} bytes",
+        manifest.snapshot_id, ref_count, size
+    );
 }
