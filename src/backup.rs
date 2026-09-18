@@ -1,6 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -69,6 +69,8 @@ pub fn backup_path(config: &Config, path: &Path) -> Result<Manifest> {
     let staged_bundle = staging.join(format!("{snapshot_id}.bundle"));
 
     let (state, artifact) = create_artifact(path, &snapshots, &snapshot_id, &staged_bundle)?;
+    let staged_lfs = staging.join(format!("{snapshot_id}.lfs.tar"));
+    let lfs_artifact = create_lfs_artifact(path, &snapshots, &snapshot_id, &staged_lfs)?;
     write_repo_envelope(&repository_root, repo_id, &repo_name, &created_at)?;
 
     let manifest = Manifest {
@@ -82,6 +84,7 @@ pub fn backup_path(config: &Config, path: &Path) -> Result<Manifest> {
         ref_state_hash: state.hash(),
         refs: Manifest::refs_from(&state),
         artifact,
+        lfs_artifact,
         encryption: None,
         refuge_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
@@ -133,8 +136,114 @@ fn create_artifact(
     bail!("repository refs changed while creating the bundle; retry the backup")
 }
 
+/// Directory git-lfs uses to store LFS object content on a hosted (or
+/// restored) bare repository. `git bundle` never captures this, since it
+/// only knows about Git objects, so it must be snapshotted separately.
+fn lfs_objects_dir(repo_path: &Path) -> PathBuf {
+    repo_path.join("lfs").join("objects")
+}
+
+fn create_lfs_artifact(
+    repo_path: &Path,
+    snapshots: &Path,
+    snapshot_id: &str,
+    staged_archive: &Path,
+) -> Result<Option<Artifact>> {
+    let lfs_objects = lfs_objects_dir(repo_path);
+    let files: Vec<PathBuf> = if lfs_objects.is_dir() {
+        walk_files(&lfs_objects)?
+    } else {
+        Vec::new()
+    };
+    if files.is_empty() {
+        return Ok(None);
+    }
+    for path in &files {
+        verify_lfs_object(path)?;
+    }
+
+    if staged_archive.exists() {
+        fs::remove_file(staged_archive)
+            .with_context(|| format!("could not remove stale {}", staged_archive.display()))?;
+    }
+    {
+        let file = File::create(staged_archive)
+            .with_context(|| format!("could not create {}", staged_archive.display()))?;
+        let mut builder = tar::Builder::new(file);
+        builder
+            .append_dir_all(".", &lfs_objects)
+            .with_context(|| format!("could not archive {}", lfs_objects.display()))?;
+        builder
+            .into_inner()
+            .with_context(|| format!("could not finish archive {}", staged_archive.display()))?;
+    }
+
+    let (checksum, size) = checksum(staged_archive)?;
+    let file_name = format!("{snapshot_id}.lfs.tar");
+    let destination = snapshots.join(&file_name);
+    publish_file(staged_archive, &destination)?;
+    Ok(Some(Artifact {
+        key: format!("snapshots/{file_name}"),
+        size,
+        checksum,
+        format: "lfs-archive".to_owned(),
+        format_version: 1,
+    }))
+}
+
+/// LFS object files are named after their own content hash (`sha256:<oid>`
+/// is the filename), regardless of the two levels of shard directories they
+/// sit under. Recomputing and comparing the hash catches local corruption
+/// before it is durably archived (or, on restore, right after extraction).
+fn verify_lfs_object(path: &Path) -> Result<()> {
+    let oid = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("LFS object path is not valid UTF-8: {}", path.display()))?;
+    let (actual, _) = checksum(path)?;
+    let expected = format!("sha256:{oid}");
+    if actual != expected {
+        bail!(
+            "LFS object {} is corrupt: content hash does not match its object id",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Verifies every object under an `lfs/objects` directory (if it exists)
+/// against its own filename-derived content hash. Used both before
+/// archiving a snapshot and after extracting one during restore.
+pub fn verify_lfs_objects(dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for path in walk_files(dir)? {
+        verify_lfs_object(&path)?;
+    }
+    Ok(())
+}
+
+fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current)
+            .with_context(|| format!("could not read directory {}", current.display()))?
+        {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
 fn publish_file(source: &Path, destination: &Path) -> Result<()> {
-    let partial = destination.with_extension("bundle.partial");
+    let partial = PathBuf::from(format!("{}.partial", destination.display()));
     if partial.exists() {
         fs::remove_file(&partial)
             .with_context(|| format!("could not remove stale {}", partial.display()))?;

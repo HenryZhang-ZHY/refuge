@@ -130,33 +130,67 @@ fn inspect(repo_root: &Path, manifest: Manifest) -> Snapshot {
             ),
         };
     }
-    let health = match &manifest.artifact {
-        Some(artifact) => match artifact_path_from_repo(repo_root, &artifact.key) {
-            Ok(path) => match std::fs::metadata(path) {
-                Ok(metadata) if metadata.is_file() && metadata.len() == artifact.size => {
-                    SnapshotHealth::Valid
-                }
-                Ok(_) => SnapshotHealth::Corrupt("artifact size differs".to_owned()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    SnapshotHealth::Corrupt("artifact is missing".to_owned())
-                }
-                Err(error) => SnapshotHealth::Corrupt(format!("artifact cannot be read: {error}")),
-            },
-            Err(error) => SnapshotHealth::Corrupt(error.to_string()),
-        },
-        None if manifest.refs.iter().all(|(name, value)| {
-            name == "HEAD" && matches!(value, ManifestRef::Symbolic { .. })
-        }) =>
-        {
-            SnapshotHealth::Valid
-        }
-        None => SnapshotHealth::Corrupt("non-empty snapshot has no artifact".to_owned()),
-    };
+    let health = snapshot_health(repo_root, &manifest);
     Snapshot { manifest, health }
+}
+
+fn snapshot_health(repo_root: &Path, manifest: &Manifest) -> SnapshotHealth {
+    let primary = match &manifest.artifact {
+        Some(artifact) => validate_present(repo_root, artifact),
+        None => {
+            let only_symbolic_head = manifest.refs.iter().all(|(name, value)| {
+                name == "HEAD" && matches!(value, ManifestRef::Symbolic { .. })
+            });
+            if only_symbolic_head {
+                None
+            } else {
+                Some(SnapshotHealth::Corrupt(
+                    "non-empty snapshot has no artifact".to_owned(),
+                ))
+            }
+        }
+    };
+    if let Some(corrupt) = primary {
+        return corrupt;
+    }
+    if let Some(lfs) = &manifest.lfs_artifact
+        && let Some(corrupt) = validate_present(repo_root, lfs)
+    {
+        return corrupt;
+    }
+    SnapshotHealth::Valid
+}
+
+/// Checks one artifact for presence/size on disk. Returns `None` when it is
+/// present and valid, or `Some(Corrupt(..))` describing the problem.
+fn validate_present(repo_root: &Path, artifact: &manifest::Artifact) -> Option<SnapshotHealth> {
+    match artifact_path_from_repo(repo_root, &artifact.key) {
+        Ok(path) => match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() == artifact.size => None,
+            Ok(_) => Some(SnapshotHealth::Corrupt("artifact size differs".to_owned())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Some(SnapshotHealth::Corrupt("artifact is missing".to_owned()))
+            }
+            Err(error) => Some(SnapshotHealth::Corrupt(format!(
+                "artifact cannot be read: {error}"
+            ))),
+        },
+        Err(error) => Some(SnapshotHealth::Corrupt(error.to_string())),
+    }
 }
 
 pub fn artifact_path(target: &Path, manifest: &Manifest) -> Result<Option<PathBuf>> {
     let Some(artifact) = &manifest.artifact else {
+        return Ok(None);
+    };
+    let repo_root = target
+        .join("refuge/v1/repos")
+        .join(manifest.repo_id.to_string());
+    artifact_path_from_repo(&repo_root, &artifact.key).map(Some)
+}
+
+pub fn lfs_artifact_path(target: &Path, manifest: &Manifest) -> Result<Option<PathBuf>> {
+    let Some(artifact) = &manifest.lfs_artifact else {
         return Ok(None);
     };
     let repo_root = target

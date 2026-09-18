@@ -36,6 +36,11 @@ pub struct Manifest {
     pub ref_state_hash: String,
     pub refs: BTreeMap<String, ManifestRef>,
     pub artifact: Option<Artifact>,
+    /// Archive of the hosted repository's `lfs/objects` content store, if
+    /// the repository has any Git LFS objects. `git bundle` only captures
+    /// Git objects, never the LFS content store, so it is snapshotted and
+    /// verified separately.
+    pub lfs_artifact: Option<Artifact>,
     pub encryption: Option<Value>,
     pub refuge_version: String,
 }

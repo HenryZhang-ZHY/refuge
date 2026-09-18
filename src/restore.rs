@@ -51,6 +51,14 @@ pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredR
         git::bundle_verify(verification.path(), path)?;
     }
 
+    let lfs_archive_path = discovery::lfs_artifact_path(options.target, &snapshot.manifest)?;
+    if let (Some(artifact), Some(path)) = (&snapshot.manifest.lfs_artifact, &lfs_archive_path) {
+        let (checksum, size) = backup::checksum(path)?;
+        if size != artifact.size || checksum != artifact.checksum {
+            bail!("snapshot LFS artifact checksum or size differs from its manifest");
+        }
+    }
+
     // Build next to the destination and publish with a same-volume rename. A
     // failed clone never leaves a half-repository at the user-visible path.
     let staging = tempfile::tempdir_in(&config.repos_dir)?;
@@ -64,6 +72,9 @@ pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredR
         git::set_symbolic_head(&staged_repo, head)?;
     }
     repo::configure(&staged_repo, snapshot.manifest.repo_id)?;
+    if let Some(path) = &lfs_archive_path {
+        extract_lfs_archive(path, &staged_repo)?;
+    }
 
     publish_repository(&staged_repo, &destination, options.replace)?;
     Ok(RestoredRepository {
@@ -71,6 +82,22 @@ pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredR
         path: destination,
         snapshot_id: snapshot.manifest.snapshot_id,
     })
+}
+
+/// Extracts a previously verified `lfs.tar` archive into
+/// `<repo>/lfs/objects`, then re-verifies each extracted object's content
+/// hash against its filename (its LFS object id) so a corrupted archive
+/// never produces a silently broken restored repository.
+fn extract_lfs_archive(archive: &Path, repo: &Path) -> Result<()> {
+    let destination = repo.join("lfs").join("objects");
+    fs::create_dir_all(&destination)
+        .with_context(|| format!("could not create {}", destination.display()))?;
+    let file = fs::File::open(archive)
+        .with_context(|| format!("could not open {}", archive.display()))?;
+    tar::Archive::new(file)
+        .unpack(&destination)
+        .with_context(|| format!("could not extract {}", archive.display()))?;
+    backup::verify_lfs_objects(&destination)
 }
 
 fn select_snapshot(snapshots: Vec<Snapshot>, selected: Option<&str>) -> Result<Snapshot> {

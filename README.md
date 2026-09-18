@@ -91,6 +91,15 @@ Useful if you skipped the hook or want to force a fresh snapshot:
 refuge backup notes
 ```
 
+## Git LFS support
+
+Refuge automatically backs up Git LFS content too. If a hosted bare repo has
+LFS objects under `lfs/objects` (e.g. because contributors pushed with
+`git-lfs` installed), every backup/restore also snapshots and restores that
+directory as a separate archive alongside the git bundle — no extra
+configuration needed. `refuge status`/`refuge backup` output shows the LFS
+byte count when present.
+
 ## Notes
 
 - Repository names may contain letters, digits, dots, dashes, and underscores.

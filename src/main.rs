@@ -282,8 +282,14 @@ fn print_protected(manifest: &refuge::manifest::Manifest) {
         .refs
         .len()
         .saturating_sub(usize::from(manifest.head().is_some()));
-    println!(
-        "protected {} {} refs {} bytes",
-        manifest.snapshot_id, ref_count, size
-    );
+    match &manifest.lfs_artifact {
+        Some(lfs) => println!(
+            "protected {} {} refs {} bytes, {} LFS bytes",
+            manifest.snapshot_id, ref_count, size, lfs.size
+        ),
+        None => println!(
+            "protected {} {} refs {} bytes",
+            manifest.snapshot_id, ref_count, size
+        ),
+    }
 }
