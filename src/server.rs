@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use fs2::FileExt;
@@ -68,6 +69,57 @@ struct ApiRepository {
     snapshot_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct LfsBatchRequest {
+    operation: String,
+    objects: Vec<LfsObjectRequest>,
+}
+
+#[derive(Deserialize)]
+struct LfsObjectRequest {
+    oid: String,
+    size: u64,
+}
+
+#[derive(Serialize)]
+struct LfsBatchResponse {
+    transfer: &'static str,
+    objects: Vec<LfsObjectResponse>,
+    hash_algo: &'static str,
+}
+
+#[derive(Serialize)]
+struct LfsObjectResponse {
+    oid: String,
+    size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authenticated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actions: Option<LfsActions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<LfsObjectError>,
+}
+
+#[derive(Serialize)]
+struct LfsActions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upload: Option<LfsAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    download: Option<LfsAction>,
+}
+
+#[derive(Serialize)]
+struct LfsAction {
+    href: String,
+    header: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct LfsObjectError {
+    code: u16,
+    message: String,
+}
+
 #[derive(Serialize)]
 struct ErrorEnvelope {
     error: ErrorBody,
@@ -113,16 +165,21 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
         .route("/repos", get(list_repositories).post(create_repository))
         .route("/repos/{name}", get(view_repository))
         .layer(middleware::from_fn_with_state(state.clone(), require_owner));
+    let git = Router::new()
+        .route("/{repo}/info/lfs/objects/batch", post(lfs_batch))
+        .route(
+            "/{repo}/info/lfs/objects/{oid}",
+            get(lfs_download).put(lfs_upload),
+        )
+        .fallback(git_http)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_git_owner,
+        ));
     let app = Router::new()
         .route("/healthz", get(|| async { Json(Health { status: "ok" }) }))
         .nest("/api/v1", api)
-        .route(
-            "/git/{*path}",
-            any(git_http).layer(middleware::from_fn_with_state(
-                state.clone(),
-                require_git_owner,
-            )),
-        )
+        .nest("/git", git)
         .with_state(state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -315,11 +372,215 @@ fn basic_secret(headers: &axum::http::HeaderMap, expected: &[u8]) -> bool {
         && bool::from(password.ct_eq(expected))
 }
 
-async fn git_http(
+async fn lfs_batch(
     State(state): State<AppState>,
-    axum::extract::Path(path): axum::extract::Path<String>,
+    axum::extract::Path(repo_segment): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(batch): Json<LfsBatchRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let repository = lfs_repository(&state.config, &repo_segment)?;
+    if batch.operation != "upload" && batch.operation != "download" {
+        return Err(ApiError::bad_request(format!(
+            "unsupported LFS operation {}",
+            batch.operation
+        )));
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::bad_request("Host header is required".to_owned()))?;
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| matches!(*value, "http" | "https"))
+        .unwrap_or("http");
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let mut action_headers = BTreeMap::new();
+    action_headers.insert("Authorization".to_owned(), authorization);
+    let mut objects = Vec::with_capacity(batch.objects.len());
+    for object in batch.objects {
+        validate_lfs_oid(&object.oid)?;
+        let path = lfs_object_path(&repository.path, &object.oid);
+        let action = LfsAction {
+            href: format!(
+                "{scheme}://{host}/git/{repo_segment}/info/lfs/objects/{}",
+                object.oid
+            ),
+            header: action_headers.clone(),
+        };
+        let (authenticated, actions, error) = match batch.operation.as_str() {
+            "upload" if valid_existing_lfs_object(&path, &object.oid, object.size) => {
+                (None, None, None)
+            }
+            "upload" => (
+                Some(true),
+                Some(LfsActions {
+                    upload: Some(action),
+                    download: None,
+                }),
+                None,
+            ),
+            "download" if valid_existing_lfs_object(&path, &object.oid, object.size) => (
+                Some(true),
+                Some(LfsActions {
+                    upload: None,
+                    download: Some(action),
+                }),
+                None,
+            ),
+            "download" => (
+                None,
+                None,
+                Some(LfsObjectError {
+                    code: 404,
+                    message: "LFS object does not exist".to_owned(),
+                }),
+            ),
+            _ => unreachable!(),
+        };
+        objects.push(LfsObjectResponse {
+            oid: object.oid,
+            size: object.size,
+            authenticated,
+            actions,
+            error,
+        });
+    }
+    Ok((
+        [(header::CONTENT_TYPE, "application/vnd.git-lfs+json")],
+        Json(LfsBatchResponse {
+            transfer: "basic",
+            objects,
+            hash_algo: "sha256",
+        }),
+    ))
+}
+
+async fn lfs_upload(
+    State(state): State<AppState>,
+    axum::extract::Path((repo_segment, oid)): axum::extract::Path<(String, String)>,
     request: Request,
+) -> Result<StatusCode, ApiError> {
+    validate_lfs_oid(&oid)?;
+    let repository = lfs_repository(&state.config, &repo_segment)?;
+    let incoming = repository.path.join("lfs").join("incoming");
+    tokio::fs::create_dir_all(&incoming)
+        .await
+        .map_err(|error| ApiError::internal(format!("could not create LFS staging: {error}")))?;
+    let staged = incoming.join(Uuid::now_v7().to_string());
+    let mut output = tokio::fs::File::create(&staged)
+        .await
+        .map_err(|error| ApiError::internal(format!("could not stage LFS object: {error}")))?;
+    let stream = request
+        .into_body()
+        .into_data_stream()
+        .map_err(std::io::Error::other);
+    let mut input = StreamReader::new(stream);
+    tokio::io::copy(&mut input, &mut output)
+        .await
+        .map_err(|error| ApiError::internal(format!("could not upload LFS object: {error}")))?;
+    output
+        .sync_all()
+        .await
+        .map_err(|error| ApiError::internal(format!("could not flush LFS object: {error}")))?;
+    drop(output);
+
+    let staged_for_check = staged.clone();
+    let (checksum, _) =
+        tokio::task::spawn_blocking(move || crate::storage::checksum(&staged_for_check))
+            .await
+            .map_err(|error| ApiError::internal(format!("LFS checksum task failed: {error}")))?
+            .map_err(ApiError::internal)?;
+    if checksum != format!("sha256:{oid}") {
+        let _ = tokio::fs::remove_file(&staged).await;
+        return Err(ApiError::unprocessable(
+            "uploaded LFS object does not match its oid".to_owned(),
+        ));
+    }
+
+    let destination = lfs_object_path(&repository.path, &oid);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| ApiError::internal("LFS object path has no parent"))?;
+    tokio::fs::create_dir_all(parent).await.map_err(|error| {
+        ApiError::internal(format!("could not create LFS object path: {error}"))
+    })?;
+    if destination.exists() {
+        let _ = tokio::fs::remove_file(&staged).await;
+    } else {
+        tokio::fs::rename(&staged, &destination)
+            .await
+            .map_err(|error| {
+                ApiError::internal(format!("could not publish LFS object: {error}"))
+            })?;
+    }
+    Ok(StatusCode::OK)
+}
+
+async fn lfs_download(
+    State(state): State<AppState>,
+    axum::extract::Path((repo_segment, oid)): axum::extract::Path<(String, String)>,
 ) -> Result<Response, ApiError> {
+    validate_lfs_oid(&oid)?;
+    let repository = lfs_repository(&state.config, &repo_segment)?;
+    let path = lfs_object_path(&repository.path, &oid);
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| ApiError::not_found("LFS object does not exist".to_owned()))?;
+    let size = file.metadata().await.map_err(ApiError::internal)?.len();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, size)
+        .body(Body::from_stream(ReaderStream::new(file)))
+        .map_err(ApiError::internal)
+}
+
+fn lfs_repository(
+    config: &Config,
+    segment: &str,
+) -> Result<crate::repo::HostedRepository, ApiError> {
+    let name = segment
+        .strip_suffix(".git")
+        .ok_or_else(|| ApiError::not_found("Git repository does not exist".to_owned()))?;
+    let repository = crate::repo::resolve(config, name)
+        .map_err(|_| ApiError::not_found("Git repository does not exist".to_owned()))?;
+    if repository.name != name {
+        return Err(ApiError::not_found(
+            "Git repository does not exist".to_owned(),
+        ));
+    }
+    Ok(repository)
+}
+
+fn validate_lfs_oid(oid: &str) -> Result<(), ApiError> {
+    if oid.len() != 64 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request("invalid LFS oid".to_owned()));
+    }
+    Ok(())
+}
+
+fn lfs_object_path(repository: &Path, oid: &str) -> PathBuf {
+    repository
+        .join("lfs/objects")
+        .join(&oid[..2])
+        .join(&oid[2..4])
+        .join(oid)
+}
+
+fn valid_existing_lfs_object(path: &Path, oid: &str, expected_size: u64) -> bool {
+    let Ok((checksum, size)) = crate::storage::checksum(path) else {
+        return false;
+    };
+    size == expected_size && checksum == format!("sha256:{oid}")
+}
+
+async fn git_http(State(state): State<AppState>, request: Request) -> Result<Response, ApiError> {
+    let path = request.uri().path().trim_start_matches('/').to_owned();
     let repository_segment = path.split('/').next().unwrap_or_default();
     let repository_name = repository_segment
         .strip_suffix(".git")
@@ -528,6 +789,14 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             code: "not_found",
+            message,
+        }
+    }
+
+    fn unprocessable(message: String) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "invalid_lfs_object",
             message,
         }
     }

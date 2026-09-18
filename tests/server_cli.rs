@@ -297,3 +297,86 @@ fn server_push_is_accepted_while_backup_is_pending_and_retries_automatically() {
     }
     stop(server);
 }
+
+#[test]
+fn standard_git_lfs_clients_upload_and_download_over_http() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let target = temp.path().join("backup");
+    let mut server = start_server(&data, Some(&target));
+    let address = address(&mut server);
+    create_repository(&address, "media");
+    let remote = format!("http://refuge:test-owner-key-0123456789@{address}/git/media.git");
+    let first = temp.path().join("lfs-first");
+    assert!(
+        git(temp.path(), &["clone", &remote, first.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(
+        git(&first, &["config", "user.name", "Refuge Test"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&first, &["config", "user.email", "refuge@example.invalid"])
+            .status
+            .success()
+    );
+    assert!(git(&first, &["lfs", "install", "--local"]).status.success());
+    assert!(git(&first, &["lfs", "track", "*.bin"]).status.success());
+    let content = b"real lfs content served over standard HTTP\n";
+    std::fs::write(first.join("asset.bin"), content).unwrap();
+    assert!(
+        git(&first, &["add", ".gitattributes", "asset.bin"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&first, &["commit", "-m", "add LFS asset"])
+            .status
+            .success()
+    );
+    let push = git(&first, &["push", "origin", "main"]);
+    assert!(
+        push.status.success(),
+        "Git LFS push failed: {}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    let second = temp.path().join("lfs-second");
+    let clone = git(temp.path(), &["clone", &remote, second.to_str().unwrap()]);
+    assert!(
+        clone.status.success(),
+        "Git LFS clone failed: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    assert_eq!(std::fs::read(second.join("asset.bin")).unwrap(), content);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let archives = std::fs::read_dir(&target)
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| walk_files(entry.unwrap().path()))
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("tar"))
+            .count();
+        if archives > 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "LFS snapshot was not published");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    stop(server);
+}
+
+fn walk_files(path: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    if path.is_file() {
+        return vec![path];
+    }
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| walk_files(entry.unwrap().path()))
+        .collect()
+}
