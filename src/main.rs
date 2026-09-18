@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process;
 
@@ -128,6 +129,27 @@ enum RepoCommands {
         #[arg(value_name = "EXISTING_REPO")]
         path: PathBuf,
     },
+    /// List hosted repositories.
+    #[command(alias = "ls")]
+    List,
+    /// Clone a hosted repository into a working directory.
+    #[command(
+        after_help = "Examples:\n  refuge repo clone notes\n  refuge repo clone notes <DIRECTORY>\n  refuge repo clone notes -- --depth=1"
+    )]
+    Clone {
+        /// Hosted repository name or stable UUID.
+        #[arg(value_name = "NAME_OR_REPO_ID")]
+        selector: String,
+        /// Working directory to create. Defaults to the repository name.
+        #[arg(value_name = "DIRECTORY")]
+        directory: Option<PathBuf>,
+        /// Name for the remote created by git clone.
+        #[arg(long, default_value = "origin", value_name = "NAME")]
+        remote_name: String,
+        /// Additional arguments passed to git clone after `--`.
+        #[arg(last = true, allow_hyphen_values = true, value_name = "GIT_ARGS")]
+        git_args: Vec<OsString>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -173,15 +195,50 @@ fn run() -> Result<()> {
         }
         Commands::Repo { command } => {
             let config = refuge::config::Config::load()?;
-            let repository = match command {
-                RepoCommands::Create { name } => refuge::repo::create(&config, &name)?,
-                RepoCommands::Import { name, path } => refuge::repo::import(&config, &name, &path)?,
-            };
-            println!(
-                "created repository {}\ngit remote add refuge \"{}\"",
-                repository.id,
-                repository.path.display()
-            );
+            match command {
+                RepoCommands::Create { name } => {
+                    let repository = refuge::repo::create(&config, &name)?;
+                    println!(
+                        "created repository {}\ngit remote add refuge \"{}\"",
+                        repository.id,
+                        repository.path.display()
+                    );
+                }
+                RepoCommands::Import { name, path } => {
+                    let repository = refuge::repo::import(&config, &name, &path)?;
+                    println!(
+                        "created repository {}\ngit remote add refuge \"{}\"",
+                        repository.id,
+                        repository.path.display()
+                    );
+                }
+                RepoCommands::List => {
+                    for repository in refuge::repo::list(&config)? {
+                        println!(
+                            "{} {} {}",
+                            repository.name,
+                            repository.id,
+                            repository.path.display()
+                        );
+                    }
+                }
+                RepoCommands::Clone {
+                    selector,
+                    directory,
+                    remote_name,
+                    git_args,
+                } => {
+                    let repository = refuge::repo::resolve(&config, &selector)?;
+                    let directory = directory.unwrap_or_else(|| PathBuf::from(&repository.name));
+                    refuge::git::clone_working(
+                        &repository.path,
+                        &directory,
+                        &remote_name,
+                        &git_args,
+                    )?;
+                    println!("cloned {} to {}", repository.name, directory.display());
+                }
+            }
         }
         Commands::Backup { name, repo_path } => {
             let config = refuge::config::Config::load()?;

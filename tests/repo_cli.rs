@@ -109,3 +109,60 @@ fn repo_create_rejects_unsafe_name() {
             "use letters, digits, dots, dashes, or underscores",
         ));
 }
+
+#[test]
+fn repo_list_and_clone_make_hosted_repositories_available_as_working_copies() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    git_output(&source, &["init", "--initial-branch=main"]);
+    git_output(&source, &["config", "user.name", "Refuge Test"]);
+    git_output(&source, &["config", "user.email", "refuge@example.invalid"]);
+    std::fs::write(source.join("entry.txt"), "one\n").unwrap();
+    git_output(&source, &["add", "entry.txt"]);
+    git_output(&source, &["commit", "-m", "initial"]);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "import", "notes", source.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let hosted = repos.join("notes.git");
+    let repo_id = git_output(&hosted, &["config", "refuge.repoid"]);
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "list"])
+        .assert()
+        .success()
+        .stdout(contains("notes"))
+        .stdout(contains(&repo_id));
+
+    let clone = temp.path().join("working-notes");
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args([
+            "repo",
+            "clone",
+            &repo_id,
+            clone.to_str().unwrap(),
+            "--",
+            "--single-branch",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("cloned notes"));
+
+    assert_eq!(
+        git_output(&clone, &["remote", "get-url", "origin"]),
+        hosted.display().to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.join("entry.txt")).unwrap(),
+        "one\n"
+    );
+}

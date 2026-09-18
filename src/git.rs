@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -133,6 +134,31 @@ pub fn clone_mirror(source: &Path, destination: &Path) -> Result<()> {
         .to_str()
         .context("clone destination is not valid UTF-8")?;
     run(None, &["clone", "--mirror", source, destination])?;
+    Ok(())
+}
+
+pub fn clone_working(
+    source: &Path,
+    destination: &Path,
+    remote_name: &str,
+    extra_args: &[OsString],
+) -> Result<()> {
+    let mut command = Command::new("git");
+    let output = command
+        .arg("clone")
+        .args(extra_args)
+        .args(["--origin", remote_name])
+        .arg(source)
+        .arg(destination)
+        .output()
+        .context("could not run git clone")?;
+    if !output.status.success() {
+        bail!(
+            "git clone failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
     Ok(())
 }
 

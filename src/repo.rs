@@ -46,6 +46,14 @@ pub fn find(config: &Config, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn resolve(config: &Config, selector: &str) -> Result<HostedRepository> {
+    let repositories = list(config)?;
+    repositories
+        .into_iter()
+        .find(|repository| repository.name == selector || repository.id.to_string() == selector)
+        .with_context(|| format!("repository does not exist: {selector}"))
+}
+
 pub fn destination(config: &Config, name: &str) -> Result<PathBuf> {
     validate_name(name)?;
     Ok(path_for(config, name))
