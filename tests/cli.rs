@@ -40,6 +40,29 @@ fn init_writes_config_and_creates_directories() {
 }
 
 #[test]
+fn init_defaults_repos_to_the_user_data_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("config.toml");
+    let target = temp.path().join("target");
+    let data_home = temp.path().join("data-home");
+
+    let mut command = Command::cargo_bin("refuge").unwrap();
+    command
+        .env("REFUGE_CONFIG", &config_path)
+        .args(["init", "--target", target.to_str().unwrap()]);
+    #[cfg(windows)]
+    command.env("LOCALAPPDATA", &data_home);
+    #[cfg(not(windows))]
+    command.env("XDG_DATA_HOME", &data_home);
+
+    command.assert().success();
+
+    let config = Config::load_from(&config_path).unwrap();
+    let expected = dunce::canonicalize(data_home.join("refuge").join("repos")).unwrap();
+    assert_eq!(config.repos_dir, expected);
+}
+
+#[test]
 fn init_rejects_repository_directory_inside_target() {
     let temp = tempfile::tempdir().unwrap();
     let target = temp.path().join("target");

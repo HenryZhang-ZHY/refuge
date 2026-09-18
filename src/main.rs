@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 const ROOT_HELP: &str = "Typical workflow:
-  1. refuge init --repos <LOCAL_DIR> --target <SYNC_DIR>
+  1. refuge init --target <SYNC_DIR>
   2. refuge repo create <NAME>
   3. Run the printed `git remote add refuge ...` command in your working copy
   4. git push refuge main
@@ -31,9 +31,13 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Initialize Refuge's local configuration.
-    #[command(after_help = "Example:\n  refuge init --repos <LOCAL_DIR> --target <SYNC_DIR>")]
+    #[command(
+        after_help = "Example:\n  refuge init --target <SYNC_DIR>\n  refuge init --repos <LOCAL_DIR> --target <SYNC_DIR>"
+    )]
     Init {
-        /// Directory that will contain live bare repositories.
+        /// Directory that will contain live bare repositories. Defaults to
+        /// the user data directory (e.g. ~/.local/share/refuge/repos, or
+        /// %LOCALAPPDATA%\refuge\repos on Windows).
         #[arg(long, value_name = "LOCAL_DIR")]
         repos: Option<PathBuf>,
         /// Directory that will receive immutable backup snapshots.

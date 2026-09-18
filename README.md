@@ -19,11 +19,15 @@ cargo build --release
 
 ### 1. Initialize Refuge
 
-Pick two directories:
-- `--repos`: a **local, non-cloud-synced** directory that will hold your live bare repositories.
-- `--target`: the sync-client folder (e.g. your OneDrive path) that will receive snapshots.
+Pick a `--target`: the sync-client folder (e.g. your OneDrive path) that will
+receive snapshots. `--repos` (the local, non-cloud-synced directory that will
+hold your live bare repositories) is optional — it defaults to your user data
+directory (`~/.local/share/refuge/repos` on Linux/macOS, `%LOCALAPPDATA%\refuge\repos`
+on Windows), which is never inside a cloud sync folder.
 
 ```powershell
+refuge init --target "C:\Users\<you>\OneDrive\refuge"
+# or, to choose your own repositories directory:
 refuge init --repos D:\git\refuge-repos --target "C:\Users\<you>\OneDrive\refuge"
 ```
 

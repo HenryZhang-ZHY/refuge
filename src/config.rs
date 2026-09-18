@@ -57,6 +57,26 @@ pub fn default_path() -> Result<PathBuf> {
         .context("could not determine the user config directory")
 }
 
+/// Default location for hosted bare repositories: the XDG *data* directory
+/// (`$XDG_DATA_HOME`, `~/.local/share` on Unix; `%LOCALAPPDATA%` on
+/// Windows), not the *config* directory. Repositories are local, potentially
+/// large, machine-specific data, not configuration, and `%LOCALAPPDATA%` is
+/// non-roaming (unlike the `%APPDATA%` used for `config.toml`), which keeps
+/// them from being swept into profile roaming/sync mechanisms.
+pub fn default_repos_dir() -> Result<PathBuf> {
+    #[cfg(windows)]
+    let base = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    #[cfg(not(windows))]
+    let base = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
+        });
+
+    base.map(|path| path.join("refuge").join("repos"))
+        .context("could not determine the user data directory")
+}
+
 pub fn initialize(repos: Option<PathBuf>, target: Option<PathBuf>) -> Result<(Config, PathBuf)> {
     let config_path = default_path()?;
     if config_path.exists() {
@@ -68,7 +88,10 @@ pub fn initialize(repos: Option<PathBuf>, target: Option<PathBuf>) -> Result<(Co
     let base = config_path
         .parent()
         .context("config path has no parent directory")?;
-    let repos = absolute(repos.unwrap_or_else(|| base.join("repos")))?;
+    let repos = match repos {
+        Some(repos) => absolute(repos)?,
+        None => absolute(default_repos_dir()?)?,
+    };
     let target = absolute(target.unwrap_or_else(|| base.join("target")))?;
     validate_paths(&repos, &target)?;
 

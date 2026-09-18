@@ -12,7 +12,7 @@ fn no_arguments_prints_quick_start_and_returns_usage_error() {
         .code(2)
         .stderr(predicate::str::contains("Typical workflow"))
         .stderr(predicate::str::contains(
-            "refuge init --repos <LOCAL_DIR> --target <SYNC_DIR>",
+            "refuge init --target <SYNC_DIR>",
         ))
         .stderr(predicate::str::contains("refuge status <NAME>"));
 }
