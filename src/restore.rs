@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::backup;
 use crate::config::Config;
 use crate::discovery::{self, Snapshot, SnapshotHealth};
+use crate::storage;
 use crate::{git, repo};
 
 pub struct RestoreOptions<'a> {
@@ -39,7 +39,7 @@ pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredR
 
     let artifact_path = discovery::artifact_path(options.target, &snapshot.manifest)?;
     if let (Some(artifact), Some(path)) = (&snapshot.manifest.artifact, &artifact_path) {
-        let (checksum, size) = backup::checksum(path)?;
+        let (checksum, size) = storage::checksum(path)?;
         if size != artifact.size || checksum != artifact.checksum {
             bail!("snapshot artifact checksum or size differs from its manifest");
         }
@@ -53,7 +53,7 @@ pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredR
 
     let lfs_archive_path = discovery::lfs_artifact_path(options.target, &snapshot.manifest)?;
     if let (Some(artifact), Some(path)) = (&snapshot.manifest.lfs_artifact, &lfs_archive_path) {
-        let (checksum, size) = backup::checksum(path)?;
+        let (checksum, size) = storage::checksum(path)?;
         if size != artifact.size || checksum != artifact.checksum {
             bail!("snapshot LFS artifact checksum or size differs from its manifest");
         }
@@ -97,7 +97,7 @@ fn extract_lfs_archive(archive: &Path, repo: &Path) -> Result<()> {
     tar::Archive::new(file)
         .unpack(&destination)
         .with_context(|| format!("could not extract {}", archive.display()))?;
-    backup::verify_lfs_objects(&destination)
+    crate::backup::verify_lfs_objects(&destination)
 }
 
 fn select_snapshot(

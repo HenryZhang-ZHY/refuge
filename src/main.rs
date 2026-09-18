@@ -239,8 +239,8 @@ fn run() -> Result<()> {
                         repository.id,
                         repository.path.display()
                     );
-                    let manifest = refuge::backup::backup_path(&config, &repository.path)?;
-                    print_protected(&manifest);
+                    let outcome = refuge::backup::backup_path(&config, &repository.path)?;
+                    print_backup_outcome(&outcome);
                     if let Some(directory) = clone {
                         let directory = directory.unwrap_or_else(|| PathBuf::from(&name));
                         refuge::git::clone_working(&repository.path, &directory, "origin", &[])?;
@@ -259,8 +259,8 @@ fn run() -> Result<()> {
                         repository.id,
                         repository.path.display()
                     );
-                    let manifest = refuge::backup::backup_path(&config, &repository.path)?;
-                    print_protected(&manifest);
+                    let outcome = refuge::backup::backup_path(&config, &repository.path)?;
+                    print_backup_outcome(&outcome);
                     if connect {
                         let remote = remote.unwrap_or_else(|| "refuge".to_owned());
                         let (hosted, _) =
@@ -331,8 +331,8 @@ fn run() -> Result<()> {
                 }
                 RepoCommands::Backup { selector } => {
                     let repository = refuge::repo::resolve(&config, &selector)?;
-                    let manifest = refuge::backup::backup_path(&config, &repository.path)?;
-                    print_protected(&manifest);
+                    let outcome = refuge::backup::backup_path(&config, &repository.path)?;
+                    print_backup_outcome(&outcome);
                 }
                 RepoCommands::Status { selector, all } => {
                     let selector = if all {
@@ -409,7 +409,7 @@ fn run() -> Result<()> {
                 refuge::backup::backup_path(&config, &path)
             });
             match result {
-                Ok(manifest) => print_protected(&manifest),
+                Ok(outcome) => print_backup_outcome(&outcome),
                 Err(error) => eprintln!("refuge: backup failed: {error:#}"),
             }
         }
@@ -436,6 +436,13 @@ fn print_protected(manifest: &refuge::manifest::Manifest) {
             "protected {} {} refs {} bytes",
             manifest.snapshot_id, ref_count, size
         ),
+    }
+}
+
+fn print_backup_outcome(outcome: &refuge::backup::BackupOutcome) {
+    print_protected(&outcome.manifest);
+    for warning in &outcome.warnings {
+        eprintln!("refuge: warning: {warning}");
     }
 }
 

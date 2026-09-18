@@ -1,10 +1,8 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
@@ -14,6 +12,7 @@ use crate::config::Config;
 use crate::git::{self, RefState};
 use crate::manifest::{self, Artifact, Manifest};
 use crate::repo;
+use crate::storage::{self, FsSnapshotStore};
 
 #[derive(Serialize)]
 struct RepoEnvelope<'a> {
@@ -23,11 +22,16 @@ struct RepoEnvelope<'a> {
     created_at: &'a str,
 }
 
-pub fn backup_named(config: &Config, name: &str) -> Result<Manifest> {
+pub struct BackupOutcome {
+    pub manifest: Manifest,
+    pub warnings: Vec<String>,
+}
+
+pub fn backup_named(config: &Config, name: &str) -> Result<BackupOutcome> {
     backup_path(config, &repo::find(config, name)?)
 }
 
-pub fn backup_path(config: &Config, path: &Path) -> Result<Manifest> {
+pub fn backup_path(config: &Config, path: &Path) -> Result<BackupOutcome> {
     backup_path_at(config, path, OffsetDateTime::now_utc(), || {})
 }
 
@@ -36,7 +40,7 @@ fn backup_path_at(
     path: &Path,
     now: OffsetDateTime,
     after_bundle_created: impl Fn(),
-) -> Result<Manifest> {
+) -> Result<BackupOutcome> {
     let repo_id = Uuid::parse_str(&git::config_get(path, "refuge.repoid")?)
         .context("repository has an invalid refuge.repoid")?;
     let repo_name = repository_name(path)?;
@@ -89,16 +93,25 @@ fn backup_path_at(
         })?;
     let staged_bundle = operation.path().join(format!("{snapshot_id}.bundle"));
 
-    let (state, artifact) = create_artifact(
+    let mut warnings = Vec::new();
+    let (state, artifact, artifact_warnings) = create_artifact(
         path,
         &snapshots,
         &snapshot_id,
         &staged_bundle,
         after_bundle_created,
     )?;
+    warnings.extend(artifact_warnings);
     let staged_lfs = operation.path().join(format!("{snapshot_id}.lfs.tar"));
-    let lfs_artifact = create_lfs_artifact(path, &snapshots, &snapshot_id, &staged_lfs)?;
-    write_repo_envelope(&repository_root, repo_id, &repo_name, &created_at)?;
+    let (lfs_artifact, lfs_warnings) =
+        create_lfs_artifact(path, &snapshots, &snapshot_id, &staged_lfs)?;
+    warnings.extend(lfs_warnings);
+    warnings.extend(
+        write_repo_envelope(&repository_root, repo_id, &repo_name, &created_at)?
+            .warnings()
+            .iter()
+            .cloned(),
+    );
 
     let manifest = Manifest {
         schema_version: 1,
@@ -118,8 +131,13 @@ fn backup_path_at(
     let manifest_path = snapshots.join(format!("{snapshot_id}.manifest.json"));
     // The manifest is the publication marker. Nothing may make a snapshot
     // discoverable until its artifact has been durably renamed into place.
-    write_json_atomic(&manifest_path, &manifest)?;
-    Ok(manifest)
+    warnings.extend(
+        write_json_atomic(&manifest_path, &manifest)?
+            .warnings()
+            .iter()
+            .cloned(),
+    );
+    Ok(BackupOutcome { manifest, warnings })
 }
 
 fn create_artifact(
@@ -128,10 +146,10 @@ fn create_artifact(
     snapshot_id: &str,
     staged_bundle: &Path,
     after_bundle_created: impl Fn(),
-) -> Result<(RefState, Option<Artifact>)> {
+) -> Result<(RefState, Option<Artifact>, Vec<String>)> {
     let mut state = git::ref_state(repo_path)?;
     if state.refs.is_empty() {
-        return Ok((state, None));
+        return Ok((state, None, Vec::new()));
     }
 
     for attempt in 0..2 {
@@ -142,10 +160,11 @@ fn create_artifact(
         after_bundle_created();
         git::bundle_verify(repo_path, staged_bundle)?;
         if git::bundle_list_heads(staged_bundle)? == state.refs {
-            let (checksum, size) = checksum(staged_bundle)?;
+            let (checksum, size) = storage::checksum(staged_bundle)?;
             let file_name = format!("{snapshot_id}.bundle");
             let destination = snapshots.join(&file_name);
-            publish_file(staged_bundle, &destination)?;
+            let outcome =
+                FsSnapshotStore.publish_file(staged_bundle, &destination, &checksum, size)?;
             return Ok((
                 state,
                 Some(Artifact {
@@ -155,6 +174,7 @@ fn create_artifact(
                     format: "git-bundle".to_owned(),
                     format_version: 2,
                 }),
+                outcome.warnings().to_vec(),
             ));
         }
         if attempt == 0 {
@@ -177,7 +197,7 @@ fn create_lfs_artifact(
     snapshots: &Path,
     snapshot_id: &str,
     staged_archive: &Path,
-) -> Result<Option<Artifact>> {
+) -> Result<(Option<Artifact>, Vec<String>)> {
     let lfs_objects = lfs_objects_dir(repo_path);
     let files: Vec<PathBuf> = if lfs_objects.is_dir() {
         walk_files(&lfs_objects)?
@@ -185,7 +205,7 @@ fn create_lfs_artifact(
         Vec::new()
     };
     if files.is_empty() {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     }
     for path in &files {
         verify_lfs_object(path)?;
@@ -207,17 +227,20 @@ fn create_lfs_artifact(
             .with_context(|| format!("could not finish archive {}", staged_archive.display()))?;
     }
 
-    let (checksum, size) = checksum(staged_archive)?;
+    let (checksum, size) = storage::checksum(staged_archive)?;
     let file_name = format!("{snapshot_id}.lfs.tar");
     let destination = snapshots.join(&file_name);
-    publish_file(staged_archive, &destination)?;
-    Ok(Some(Artifact {
-        key: format!("snapshots/{file_name}"),
-        size,
-        checksum,
-        format: "lfs-archive".to_owned(),
-        format_version: 1,
-    }))
+    let outcome = FsSnapshotStore.publish_file(staged_archive, &destination, &checksum, size)?;
+    Ok((
+        Some(Artifact {
+            key: format!("snapshots/{file_name}"),
+            size,
+            checksum,
+            format: "lfs-archive".to_owned(),
+            format_version: 1,
+        }),
+        outcome.warnings().to_vec(),
+    ))
 }
 
 /// LFS object files are named after their own content hash (`sha256:<oid>`
@@ -229,7 +252,7 @@ fn verify_lfs_object(path: &Path) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .with_context(|| format!("LFS object path is not valid UTF-8: {}", path.display()))?;
-    let (actual, _) = checksum(path)?;
+    let (actual, _) = storage::checksum(path)?;
     let expected = format!("sha256:{oid}");
     if actual != expected {
         bail!(
@@ -271,46 +294,6 @@ fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn publish_file(source: &Path, destination: &Path) -> Result<()> {
-    let partial = PathBuf::from(format!("{}.partial", destination.display()));
-    if partial.exists() {
-        fs::remove_file(&partial)
-            .with_context(|| format!("could not remove stale {}", partial.display()))?;
-    }
-    fs::copy(source, &partial).with_context(|| {
-        format!(
-            "could not stage artifact {} at {}",
-            source.display(),
-            partial.display()
-        )
-    })?;
-    sync_best_effort(
-        &File::open(&partial).with_context(|| format!("could not reopen {}", partial.display()))?,
-    );
-    fs::rename(&partial, destination)
-        .with_context(|| format!("could not publish artifact {}", destination.display()))?;
-    fs::remove_file(source)
-        .with_context(|| format!("could not remove staged source {}", source.display()))?;
-    Ok(())
-}
-
-pub(crate) fn checksum(path: &Path) -> Result<(String, u64)> {
-    let mut file =
-        File::open(path).with_context(|| format!("could not open {}", path.display()))?;
-    let mut digest = Sha256::new();
-    let mut size = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-        size += read as u64;
-    }
-    Ok((format!("sha256:{:x}", digest.finalize()), size))
-}
-
 fn next_generation(snapshots: &Path) -> Result<u64> {
     let mut generation = 0;
     for path in manifest::paths_in(snapshots)? {
@@ -322,10 +305,15 @@ fn next_generation(snapshots: &Path) -> Result<u64> {
         .context("snapshot generation overflow")
 }
 
-fn write_repo_envelope(root: &Path, id: Uuid, name: &str, created_at: &str) -> Result<()> {
+fn write_repo_envelope(
+    root: &Path,
+    id: Uuid,
+    name: &str,
+    created_at: &str,
+) -> Result<storage::CommitOutcome> {
     let destination = root.join("repo.json");
     if destination.exists() {
-        return Ok(());
+        return Ok(storage::CommitOutcome::Committed);
     }
     write_json_atomic(
         &destination,
@@ -338,33 +326,13 @@ fn write_repo_envelope(root: &Path, id: Uuid, name: &str, created_at: &str) -> R
     )
 }
 
-fn write_json_atomic<T: Serialize>(destination: &Path, value: &T) -> Result<()> {
+fn write_json_atomic<T: Serialize>(
+    destination: &Path,
+    value: &T,
+) -> Result<storage::CommitOutcome> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    let partial = destination.with_extension(format!(
-        "{}.partial",
-        destination
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("json")
-    ));
-    let mut file = File::create(&partial)
-        .with_context(|| format!("could not create {}", partial.display()))?;
-    file.write_all(&bytes)
-        .with_context(|| format!("could not write {}", partial.display()))?;
-    sync_best_effort(&file);
-    drop(file);
-    fs::rename(&partial, destination)
-        .with_context(|| format!("could not publish {}", destination.display()))
-}
-
-// `sync_all` (fsync/FlushFileBuffers) is best-effort: some target
-// filesystems (notably cloud-sync folders like OneDrive's Files On-Demand)
-// deny explicit flushes even though the write itself already succeeded.
-// The subsequent rename is still atomic on the local filesystem, and
-// Refuge does not claim to verify durability of the cloud upload anyway.
-fn sync_best_effort(file: &File) {
-    let _ = file.sync_all();
+    FsSnapshotStore.publish_bytes(&bytes, destination)
 }
 
 fn repository_name(path: &Path) -> Result<String> {
@@ -442,13 +410,17 @@ mod tests {
                 })
             })
             .collect();
-        let manifests: Vec<_> = handles
+        let outcomes: Vec<_> = handles
             .into_iter()
             .map(|handle| handle.join().unwrap().unwrap())
             .collect();
 
-        assert_eq!(manifests[0].snapshot_id, manifests[1].snapshot_id);
-        for manifest in manifests {
+        assert_eq!(
+            outcomes[0].manifest.snapshot_id,
+            outcomes[1].manifest.snapshot_id
+        );
+        for outcome in outcomes {
+            let manifest = outcome.manifest;
             let expected_refs = manifest
                 .refs
                 .iter()

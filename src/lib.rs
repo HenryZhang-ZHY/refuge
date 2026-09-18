@@ -5,3 +5,4 @@ pub mod git;
 pub mod manifest;
 pub mod repo;
 pub mod restore;
+pub mod storage;
