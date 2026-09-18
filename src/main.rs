@@ -1,9 +1,33 @@
-use clap::Parser;
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "refuge", version, about = "Local-first Git repository backup")]
-struct Cli {}
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
 
-fn main() {
-    Cli::parse();
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Initialize Refuge's local configuration.
+    Init {
+        /// Directory that will contain live bare repositories.
+        #[arg(long)]
+        repos: Option<PathBuf>,
+        /// Directory that will receive immutable backup snapshots.
+        #[arg(long)]
+        target: Option<PathBuf>,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    if let Some(Commands::Init { repos, target }) = cli.command {
+        let (_, path) = refuge::config::initialize(repos, target)?;
+        println!("initialized refuge at {}", path.display());
+    }
+    Ok(())
 }
