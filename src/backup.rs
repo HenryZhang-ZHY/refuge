@@ -139,7 +139,7 @@ fn publish_file(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn checksum(path: &Path) -> Result<(String, u64)> {
+pub(crate) fn checksum(path: &Path) -> Result<(String, u64)> {
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();
     let mut size = 0_u64;

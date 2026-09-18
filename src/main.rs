@@ -42,6 +42,18 @@ enum Commands {
         #[command(subcommand)]
         command: SnapshotCommands,
     },
+    /// Restore a repository from a verified snapshot.
+    Restore {
+        name_or_repo_id: String,
+        #[arg(long)]
+        snapshot: Option<String>,
+        #[arg(long = "as")]
+        as_name: Option<String>,
+        #[arg(long)]
+        target: Option<PathBuf>,
+        #[arg(long)]
+        replace: bool,
+    },
     #[command(hide = true)]
     Hook {
         #[command(subcommand)]
@@ -136,6 +148,32 @@ fn main() -> Result<()> {
                     snapshot.health
                 );
             }
+        }
+        Some(Commands::Restore {
+            name_or_repo_id,
+            snapshot,
+            as_name,
+            target,
+            replace,
+        }) => {
+            let config = refuge::config::Config::load()?;
+            let target = target.as_deref().unwrap_or(&config.target_root);
+            let restored = refuge::restore::restore(
+                &config,
+                refuge::restore::RestoreOptions {
+                    selector: &name_or_repo_id,
+                    snapshot_id: snapshot.as_deref(),
+                    as_name: as_name.as_deref(),
+                    target,
+                    replace,
+                },
+            )?;
+            println!(
+                "restored {} from {} at {}",
+                restored.name,
+                restored.snapshot_id,
+                restored.path.display()
+            );
         }
         Some(Commands::Hook {
             command: HookCommands::PostReceive,

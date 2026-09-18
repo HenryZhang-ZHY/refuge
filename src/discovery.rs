@@ -120,8 +120,18 @@ fn list_for_repo(target: &Path, repo_id: uuid::Uuid) -> Result<Vec<Snapshot>> {
 }
 
 fn inspect(repo_root: &Path, manifest: Manifest) -> Snapshot {
+    if repo_root.file_name().and_then(|name| name.to_str())
+        != Some(manifest.repo_id.to_string().as_str())
+    {
+        return Snapshot {
+            manifest,
+            health: SnapshotHealth::Corrupt(
+                "manifest repository id differs from its directory".to_owned(),
+            ),
+        };
+    }
     let health = match &manifest.artifact {
-        Some(artifact) => match artifact_path(repo_root, &artifact.key) {
+        Some(artifact) => match artifact_path_from_repo(repo_root, &artifact.key) {
             Ok(path) => match std::fs::metadata(path) {
                 Ok(metadata) if metadata.is_file() && metadata.len() == artifact.size => {
                     SnapshotHealth::Valid
@@ -145,7 +155,17 @@ fn inspect(repo_root: &Path, manifest: Manifest) -> Snapshot {
     Snapshot { manifest, health }
 }
 
-fn artifact_path(repo_root: &Path, key: &str) -> Result<PathBuf> {
+pub fn artifact_path(target: &Path, manifest: &Manifest) -> Result<Option<PathBuf>> {
+    let Some(artifact) = &manifest.artifact else {
+        return Ok(None);
+    };
+    let repo_root = target
+        .join("refuge/v1/repos")
+        .join(manifest.repo_id.to_string());
+    artifact_path_from_repo(&repo_root, &artifact.key).map(Some)
+}
+
+fn artifact_path_from_repo(repo_root: &Path, key: &str) -> Result<PathBuf> {
     let key = Path::new(key);
     let mut components = key.components();
     if components.next() != Some(Component::Normal("snapshots".as_ref()))

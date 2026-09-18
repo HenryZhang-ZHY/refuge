@@ -46,6 +46,11 @@ pub fn find(config: &Config, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn destination(config: &Config, name: &str) -> Result<PathBuf> {
+    validate_name(name)?;
+    Ok(path_for(config, name))
+}
+
 pub fn list(config: &Config) -> Result<Vec<HostedRepository>> {
     let mut repositories = Vec::new();
     for entry in std::fs::read_dir(&config.repos_dir)? {
@@ -92,11 +97,16 @@ fn validate_name(name: &str) -> Result<()> {
 
 fn finish_setup(path: PathBuf) -> Result<Repository> {
     let id = Uuid::now_v7();
-    git::config_set(&path, "refuge.repoid", &id.to_string())?;
-    git::config_set(&path, "gc.auto", "0")?;
-    git::config_set(&path, "maintenance.auto", "false")?;
-    install_hook(&path)?;
+    configure(&path, id)?;
     Ok(Repository { path, id })
+}
+
+pub fn configure(path: &Path, id: Uuid) -> Result<()> {
+    git::config_set(path, "refuge.repoid", &id.to_string())?;
+    git::config_set(path, "gc.auto", "0")?;
+    git::config_set(path, "maintenance.auto", "false")?;
+    install_hook(path)?;
+    Ok(())
 }
 
 pub fn install_hook(repo: &Path) -> Result<()> {
