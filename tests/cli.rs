@@ -13,6 +13,20 @@ fn prints_version() {
 }
 
 #[test]
+fn version_subcommand_prints_version_and_release_url() {
+    Command::cargo_bin("refuge")
+        .expect("refuge binary")
+        .arg("version")
+        .assert()
+        .success()
+        .stdout(format!(
+            "refuge version {}\nhttps://github.com/HenryZhang-ZHY/refuge/releases/tag/v{}\n",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_VERSION")
+        ));
+}
+
+#[test]
 fn init_writes_config_and_creates_directories() {
     let temp = tempfile::tempdir().unwrap();
     let config_path = temp.path().join("config.toml");

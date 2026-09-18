@@ -32,6 +32,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Show the Refuge CLI version.
+    Version,
     /// Initialize Refuge's local configuration.
     #[command(
         after_help = "Example:\n  refuge init --target <SYNC_DIR>\n  refuge init --repos <LOCAL_DIR> --target <SYNC_DIR>"
@@ -212,6 +214,11 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Version => {
+            let version = env!("CARGO_PKG_VERSION");
+            println!("refuge version {version}");
+            println!("{}/releases/tag/v{version}", env!("CARGO_PKG_REPOSITORY"));
+        }
         Commands::Init { repos, target } => {
             let (config, path) = refuge::config::initialize(repos, Some(target))?;
             println!("initialized refuge at {}", path.display());

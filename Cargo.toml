@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Local-first Git repository backup"
 license = "MIT"
+repository = "https://github.com/HenryZhang-ZHY/refuge"
 
 [dependencies]
 anyhow = "1.0"

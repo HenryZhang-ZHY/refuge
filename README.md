@@ -21,6 +21,12 @@ bake in an absolute path), so backups keep working across rebuilds or moves
 as long as `refuge` stays on `PATH`. If it isn't found, the push still
 succeeds but prints a clear warning that the snapshot was NOT backed up.
 
+Check the installed CLI version with:
+
+```powershell
+refuge version
+```
+
 ## Getting Started
 
 ### 1. Initialize Refuge
