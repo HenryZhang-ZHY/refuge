@@ -54,6 +54,21 @@ refuge repo import notes D:\path\to\existing\repo
 Either command prints a `git remote add refuge ...` command — run it inside
 your working copy.
 
+For a new repository, Refuge can also create a working copy immediately:
+
+```powershell
+refuge repo create notes --clone
+# or choose the working-copy directory:
+refuge repo create notes --clone D:\work\notes
+```
+
+When importing an existing working tree, `--connect` adds a `refuge` remote
+to that tree and immediately publishes its initial snapshot:
+
+```powershell
+refuge repo import notes D:\work\notes --connect
+```
+
 ### 3. Push to back it up
 
 ```powershell
@@ -79,7 +94,43 @@ refuge snapshots list
 refuge snapshots list notes
 ```
 
-### 6. Restore
+### 6. Create another working copy
+
+List hosted repositories and clone one by name or stable repository ID:
+
+```powershell
+refuge repo list
+refuge repo clone notes
+refuge repo clone notes D:\work\notes
+```
+
+`repo clone` creates the standard `origin` remote. Additional `git clone`
+arguments may be supplied after `--`, for example:
+
+```powershell
+refuge repo clone notes -- --single-branch
+```
+
+To connect an existing working copy without importing it again:
+
+```powershell
+cd D:\work\notes
+refuge repo connect notes
+```
+
+This adds a remote named `refuge` without replacing an existing remote. Use
+`--remote <NAME>` to choose another name, or `--replace` to explicitly update
+an existing remote with that name.
+
+Inside a connected working copy, `.` selects the associated hosted repository:
+
+```powershell
+refuge repo view
+refuge status .
+refuge backup .
+```
+
+### 7. Restore
 
 Restore the newest valid snapshot (or a specific one) from the target
 directory, e.g. onto a fresh machine after `refuge init`:
