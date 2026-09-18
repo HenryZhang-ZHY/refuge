@@ -17,6 +17,7 @@ your sync client remains responsible for uploading that directory.";
 #[derive(Debug, Parser)]
 #[command(
     name = "refuge",
+    bin_name = "refuge",
     version,
     about = "Local-first Git repository backup",
     long_about = "Host live Git repositories outside sync folders and publish verified, immutable snapshots to a filesystem target.",

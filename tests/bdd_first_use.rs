@@ -419,6 +419,11 @@ fn restored_repository_is_cloneable(world: &mut RefugeWorld) {
     git_stdout(
         world.temp.path(),
         &[
+            // The published bundle's blob is exactly "first note\n"; disable
+            // any local/global core.autocrlf so checkout doesn't rewrite it
+            // to CRLF, which would make this assertion machine-dependent.
+            "-c",
+            "core.autocrlf=false",
             "clone",
             world.restored.as_ref().unwrap().to_str().unwrap(),
             clone.to_str().unwrap(),
