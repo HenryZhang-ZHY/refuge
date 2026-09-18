@@ -1,18 +1,24 @@
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::{Json, Router};
+use base64::Engine;
 use fs2::FileExt;
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -33,6 +39,7 @@ struct ServerLayout {
 #[derive(Clone)]
 struct AppState {
     config: Config,
+    config_path: PathBuf,
     secret: Arc<[u8]>,
 }
 
@@ -93,6 +100,7 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
     layout.write_server_info(address)?;
     let state = AppState {
         config: layout.config.clone(),
+        config_path: layout.root.join("config.toml"),
         secret,
     };
 
@@ -106,6 +114,13 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { Json(Health { status: "ok" }) }))
         .nest("/api/v1", api)
+        .route(
+            "/git/{*path}",
+            any(git_http).layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_git_owner,
+            )),
+        )
         .with_state(state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -254,6 +269,188 @@ async fn require_owner(State(state): State<AppState>, request: Request, next: Ne
         header::HeaderValue::from_static("Bearer realm=\"Refuge\""),
     );
     response
+}
+
+async fn require_git_owner(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if basic_secret(request.headers(), &state.secret) {
+        return next.run(request).await;
+    }
+    let mut response = ApiError {
+        status: StatusCode::UNAUTHORIZED,
+        code: "unauthorized",
+        message: "Git credentials are required".to_owned(),
+    }
+    .into_response();
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"Refuge Git\", charset=\"UTF-8\""),
+    );
+    response
+}
+
+fn basic_secret(headers: &axum::http::HeaderMap, expected: &[u8]) -> bool {
+    let Some(encoded) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Basic "))
+    else {
+        return false;
+    };
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+        return false;
+    };
+    let Some(separator) = decoded.iter().position(|byte| *byte == b':') else {
+        return false;
+    };
+    let username = &decoded[..separator];
+    let password = &decoded[separator + 1..];
+    username == b"refuge"
+        && password.len() == expected.len()
+        && bool::from(password.ct_eq(expected))
+}
+
+async fn git_http(
+    State(state): State<AppState>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let repository_segment = path.split('/').next().unwrap_or_default();
+    let repository_name = repository_segment
+        .strip_suffix(".git")
+        .ok_or_else(|| ApiError::not_found("Git repository does not exist".to_owned()))?;
+    let repository = crate::repo::resolve(&state.config, repository_name)
+        .map_err(|_| ApiError::not_found("Git repository does not exist".to_owned()))?;
+    if repository.name != repository_name {
+        return Err(ApiError::not_found(
+            "Git repository does not exist".to_owned(),
+        ));
+    }
+
+    let (parts, body) = request.into_parts();
+    let mut command = tokio::process::Command::new("git");
+    command
+        .arg("http-backend")
+        .env("GIT_PROJECT_ROOT", &state.config.repos_dir)
+        .env("GIT_HTTP_EXPORT_ALL", "1")
+        .env("PATH_INFO", format!("/{path}"))
+        .env("REQUEST_METHOD", parts.method.as_str())
+        .env("QUERY_STRING", parts.uri.query().unwrap_or_default())
+        .env("REMOTE_USER", "refuge")
+        .env("REMOTE_ADDR", "unknown")
+        .env("REFUGE_CONFIG", &state.config_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    if let Some(value) = parts.headers.get(header::CONTENT_TYPE) {
+        command.env("CONTENT_TYPE", value.to_str().unwrap_or_default());
+    }
+    if let Some(value) = parts.headers.get(header::CONTENT_LENGTH) {
+        command.env("CONTENT_LENGTH", value.to_str().unwrap_or_default());
+    }
+    if let Some(value) = parts.headers.get("git-protocol") {
+        command.env("HTTP_GIT_PROTOCOL", value.to_str().unwrap_or_default());
+    }
+
+    let mut child = command.spawn().map_err(|error| {
+        ApiError::internal(format!("could not start git http-backend: {error}"))
+    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| ApiError::internal("git http-backend stdin is unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ApiError::internal("git http-backend stdout is unavailable"))?;
+
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
+    let mut reader = StreamReader::new(stream);
+    tokio::io::copy(&mut reader, &mut stdin)
+        .await
+        .map_err(|error| ApiError::internal(format!("could not stream Git request: {error}")))?;
+    stdin
+        .shutdown()
+        .await
+        .map_err(|error| ApiError::internal(format!("could not finish Git request: {error}")))?;
+    drop(stdin);
+
+    cgi_response(stdout, child).await
+}
+
+async fn cgi_response(
+    stdout: tokio::process::ChildStdout,
+    mut child: tokio::process::Child,
+) -> Result<Response, ApiError> {
+    let mut stdout = BufReader::new(stdout);
+    let mut status = StatusCode::OK;
+    let mut headers = Vec::new();
+    let mut header_bytes = 0_usize;
+    loop {
+        let mut line = Vec::new();
+        let read = stdout
+            .read_until(b'\n', &mut line)
+            .await
+            .map_err(|error| ApiError::internal(format!("could not read Git response: {error}")))?;
+        if read == 0 {
+            return Err(ApiError::internal(
+                "git http-backend ended before returning CGI headers",
+            ));
+        }
+        header_bytes += read;
+        if header_bytes > 64 * 1024 {
+            return Err(ApiError::internal(
+                "git http-backend returned oversized headers",
+            ));
+        }
+        while line
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            line.pop();
+        }
+        if line.is_empty() {
+            break;
+        }
+        let Some(separator) = line.iter().position(|byte| *byte == b':') else {
+            return Err(ApiError::internal(
+                "git http-backend returned a malformed header",
+            ));
+        };
+        let name = HeaderName::from_bytes(&line[..separator])
+            .map_err(|_| ApiError::internal("git http-backend returned an invalid header name"))?;
+        let value = line[separator + 1..]
+            .strip_prefix(b" ")
+            .unwrap_or(&line[separator + 1..]);
+        if name == "status" {
+            status = std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<u16>().ok())
+                .and_then(|value| StatusCode::from_u16(value).ok())
+                .ok_or_else(|| ApiError::internal("git http-backend returned an invalid status"))?;
+        } else if name != header::CONNECTION && name != header::TRANSFER_ENCODING {
+            let value = HeaderValue::from_bytes(value)
+                .map_err(|_| ApiError::internal("git http-backend returned an invalid header"))?;
+            headers.push((name, value));
+        }
+    }
+
+    tokio::spawn(async move {
+        if let Err(error) = child.wait().await {
+            eprintln!("refuge: git http-backend wait failed: {error}");
+        }
+    });
+    let mut response = Response::builder().status(status);
+    for (name, value) in headers {
+        response = response.header(name, value);
+    }
+    response
+        .body(Body::from_stream(ReaderStream::new(stdout)))
+        .map_err(|error| ApiError::internal(format!("could not build Git response: {error}")))
 }
 
 async fn list_repositories(

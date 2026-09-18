@@ -14,6 +14,7 @@ fn start_server(data: &std::path::Path, target: Option<&std::path::Path>) -> std
         .arg(data)
         .args(["--listen", "127.0.0.1:0"])
         .env("REFUGE_SECRET", "test-owner-key-0123456789")
+        .env("PATH", support::path_with_refuge())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(target) = target {
@@ -28,6 +29,16 @@ fn request(address: &str, request: &[u8]) -> String {
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
+}
+
+fn git(current_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .arg("-C")
+        .arg(current_dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("run git")
 }
 
 fn address(child: &mut std::process::Child) -> String {
@@ -142,5 +153,62 @@ fn repository_api_requires_the_owner_secret_and_creates_repositories() {
     assert!(listed.starts_with("HTTP/1.1 200 OK"), "{listed}");
     assert!(listed.contains("\"name\":\"notes\""), "{listed}");
     assert!(data.join("repos/notes.git").is_dir());
+    stop(server);
+}
+
+#[test]
+fn standard_git_clients_clone_push_and_fetch_over_http() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let target = temp.path().join("backup");
+    let mut server = start_server(&data, Some(&target));
+    let address = address(&mut server);
+    let body = br#"{"name":"notes"}"#;
+    let create = format!(
+        "POST /api/v1/repos HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-owner-key-0123456789\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        String::from_utf8_lossy(body)
+    );
+    assert!(request(&address, create.as_bytes()).starts_with("HTTP/1.1 201 Created"));
+
+    let remote = format!("http://refuge:test-owner-key-0123456789@{address}/git/notes.git");
+    let first = temp.path().join("first");
+    let clone = git(temp.path(), &["clone", &remote, first.to_str().unwrap()]);
+    assert!(
+        clone.status.success(),
+        "git clone failed: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    assert!(
+        git(&first, &["config", "user.name", "Refuge Test"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&first, &["config", "user.email", "refuge@example.invalid"])
+            .status
+            .success()
+    );
+    std::fs::write(first.join("README.md"), "served by Refuge\n").unwrap();
+    assert!(git(&first, &["add", "README.md"]).status.success());
+    assert!(git(&first, &["commit", "-m", "initial"]).status.success());
+    let push = git(&first, &["push", "origin", "main"]);
+    assert!(
+        push.status.success(),
+        "git push failed: {}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    let second = temp.path().join("second");
+    let clone = git(temp.path(), &["clone", &remote, second.to_str().unwrap()]);
+    assert!(
+        clone.status.success(),
+        "second clone failed: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(second.join("README.md")).unwrap(),
+        "served by Refuge\n"
+    );
     stop(server);
 }
