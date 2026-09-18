@@ -88,8 +88,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Init { repos, target }) => {
-            let (_, path) = refuge::config::initialize(repos, target)?;
+            let (config, path) = refuge::config::initialize(repos, target)?;
             println!("initialized refuge at {}", path.display());
+            println!("Repositories: {}", config.repos_dir.display());
+            println!("Backup target: {}", config.target_root.display());
+            println!(
+                "Cloud upload is not verified by Refuge; the sync client is responsible for uploading this target."
+            );
+            println!("Next: refuge repo create <name>");
         }
         Some(Commands::Repo { command }) => {
             let config = refuge::config::Config::load()?;
@@ -117,7 +123,9 @@ fn main() -> Result<()> {
             for (repository, state) in refuge::discovery::statuses(&config, name.as_deref())? {
                 let description = match state {
                     refuge::discovery::ProtectionState::Protected { snapshot_id } => {
-                        format!("Protected ({snapshot_id})")
+                        format!(
+                            "Protected locally ({snapshot_id})\n  Cloud upload is not verified by Refuge"
+                        )
                     }
                     refuge::discovery::ProtectionState::Pending => {
                         "Pending (run `refuge backup`)".to_owned()
