@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process;
 
@@ -34,6 +35,18 @@ struct Cli {
 enum Commands {
     /// Show the Refuge CLI version.
     Version,
+    /// Start the persistent HTTP server, bootstrapping its data directory when needed.
+    Serve {
+        /// Persistent server data directory.
+        #[arg(value_name = "DATA_DIR")]
+        data: PathBuf,
+        /// Filesystem or NAS directory that receives immutable backups. Required on first start.
+        #[arg(long, value_name = "BACKUP_DIR")]
+        target: Option<PathBuf>,
+        /// HTTP listen address.
+        #[arg(long, default_value = "127.0.0.1:7788", value_name = "ADDRESS")]
+        listen: SocketAddr,
+    },
     /// Initialize Refuge's local configuration.
     #[command(
         after_help = "Example:\n  refuge init --target <SYNC_DIR>\n  refuge init --repos <LOCAL_DIR> --target <SYNC_DIR>"
@@ -219,6 +232,15 @@ fn run() -> Result<()> {
             println!("refuge version {version}");
             println!("{}/releases/tag/v{version}", env!("CARGO_PKG_REPOSITORY"));
         }
+        Commands::Serve {
+            data,
+            target,
+            listen,
+        } => refuge::server::serve(refuge::server::ServeOptions {
+            data_root: data,
+            target_root: target,
+            listen,
+        })?,
         Commands::Init { repos, target } => {
             let (config, path) = refuge::config::initialize(repos, Some(target))?;
             println!("initialized refuge at {}", path.display());

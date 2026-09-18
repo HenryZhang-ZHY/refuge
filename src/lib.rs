@@ -7,4 +7,5 @@ pub mod lfs;
 pub mod manifest;
 pub mod repo;
 pub mod restore;
+pub mod server;
 pub mod storage;
