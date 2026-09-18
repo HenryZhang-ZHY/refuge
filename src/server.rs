@@ -16,7 +16,9 @@ use axum::{Json, Router};
 use base64::Engine;
 use fs2::FileExt;
 use futures_util::TryStreamExt;
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -42,6 +44,7 @@ struct AppState {
     config: Config,
     config_path: PathBuf,
     secret: Arc<[u8]>,
+    session_token: Arc<str>,
 }
 
 #[derive(Serialize)]
@@ -58,6 +61,11 @@ struct ServerInfo {
 #[derive(Deserialize)]
 struct CreateRepository {
     name: String,
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    secret: String,
 }
 
 #[derive(Serialize)]
@@ -137,6 +145,10 @@ struct ApiError {
     message: String,
 }
 
+#[derive(RustEmbed)]
+#[folder = "web/dist"]
+struct WebAssets;
+
 pub fn serve(options: ServeOptions) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("could not start the server runtime")?;
     runtime.block_on(serve_async(options))
@@ -153,6 +165,7 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
     let state = AppState {
         config: layout.config.clone(),
         config_path: layout.root.join("config.toml"),
+        session_token: session_token(&secret).into(),
         secret,
     };
     crate::backup_queue::reconcile(&state.config, &layout.root)?;
@@ -161,10 +174,13 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
     println!("serving refuge on http://{address}");
     std::io::stdout().flush()?;
 
-    let api = Router::new()
+    let protected_api = Router::new()
         .route("/repos", get(list_repositories).post(create_repository))
         .route("/repos/{name}", get(view_repository))
         .layer(middleware::from_fn_with_state(state.clone(), require_owner));
+    let api = Router::new()
+        .route("/session", post(login).delete(logout))
+        .merge(protected_api);
     let git = Router::new()
         .route("/{repo}/info/lfs/objects/batch", post(lfs_batch))
         .route(
@@ -180,6 +196,7 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
         .route("/healthz", get(|| async { Json(Health { status: "ok" }) }))
         .nest("/api/v1", api)
         .nest("/git", git)
+        .fallback(web_asset)
         .with_state(state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -191,6 +208,37 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+async fn web_asset(request: Request) -> Response {
+    let requested = request.uri().path().trim_start_matches('/');
+    let path = if requested.is_empty() {
+        "index.html"
+    } else {
+        requested
+    };
+    let asset = WebAssets::get(path).or_else(|| WebAssets::get("index.html"));
+    let Some(asset) = asset else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let content_type = mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .as_ref()
+        .to_owned();
+    let cache_control = if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, cache_control.to_owned()),
+        ],
+        asset.data,
+    )
+        .into_response()
 }
 
 impl ServerLayout {
@@ -311,10 +359,26 @@ async fn require_owner(State(state): State<AppState>, request: Request, next: Ne
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::as_bytes);
-    let authenticated = provided.is_some_and(|provided| {
+    let bearer_authenticated = provided.is_some_and(|provided| {
         provided.len() == state.secret.len() && bool::from(provided.ct_eq(state.secret.as_ref()))
     });
-    if authenticated {
+    let cookie_authenticated = request
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|cookie| {
+                cookie
+                    .trim()
+                    .strip_prefix("refuge_session=")
+                    .map(str::as_bytes)
+            })
+        })
+        .is_some_and(|provided| {
+            provided.len() == state.session_token.len()
+                && bool::from(provided.ct_eq(state.session_token.as_bytes()))
+        });
+    if bearer_authenticated || cookie_authenticated {
         return next.run(request).await;
     }
     let mut response = ApiError {
@@ -328,6 +392,47 @@ async fn require_owner(State(state): State<AppState>, request: Request, next: Ne
         header::HeaderValue::from_static("Bearer realm=\"Refuge\""),
     );
     response
+}
+
+async fn login(
+    State(state): State<AppState>,
+    Json(request): Json<LoginRequest>,
+) -> Result<Response, ApiError> {
+    let provided = request.secret.as_bytes();
+    if provided.len() != state.secret.len() || !bool::from(provided.ct_eq(state.secret.as_ref())) {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized",
+            message: "the owner key is incorrect".to_owned(),
+        });
+    }
+    let cookie = format!(
+        "refuge_session={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800",
+        state.session_token
+    );
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap())],
+    )
+        .into_response())
+}
+
+async fn logout() -> Response {
+    (
+        StatusCode::NO_CONTENT,
+        [(
+            header::SET_COOKIE,
+            "refuge_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+        )],
+    )
+        .into_response()
+}
+
+fn session_token(secret: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"refuge-web-session-v1\0");
+    digest.update(secret);
+    format!("{:x}", digest.finalize())
 }
 
 async fn require_git_owner(

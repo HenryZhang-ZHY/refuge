@@ -103,6 +103,12 @@ fn serve_bootstraps_persistent_state_and_health_endpoint() {
     assert!(data.join("config.toml").is_file());
     assert!(data.join("repos").is_dir());
     assert!(target.is_dir());
+    let web = request(
+        &server_address,
+        b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert!(web.starts_with("HTTP/1.1 200 OK"), "{web}");
+    assert!(web.contains("<title>Refuge</title>"), "{web}");
     stop(server);
 
     let mut restarted = start_server(&data, None);
@@ -173,6 +179,47 @@ fn repository_api_requires_the_owner_secret_and_creates_repositories() {
     assert!(listed.starts_with("HTTP/1.1 200 OK"), "{listed}");
     assert!(listed.contains("\"name\":\"notes\""), "{listed}");
     assert!(data.join("repos/notes.git").is_dir());
+    stop(server);
+}
+
+#[test]
+fn web_session_reuses_the_owner_secret_without_returning_it_to_javascript() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let target = temp.path().join("backup");
+    let mut server = start_server(&data, Some(&target));
+    let address = address(&mut server);
+    let body = br#"{"secret":"test-owner-key-0123456789"}"#;
+    let login = request(
+        &address,
+        format!(
+            "POST /api/v1/session HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        )
+        .as_bytes(),
+    );
+    assert!(login.starts_with("HTTP/1.1 204 No Content"), "{login}");
+    let cookie = login
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .and_then(|line| line.split(';').next())
+        .expect("session cookie");
+    assert!(!cookie.contains("test-owner-key"));
+    assert!(login.contains("HttpOnly"));
+    assert!(login.contains("SameSite=Strict"));
+
+    let authenticated = request(
+        &address,
+        format!(
+            "GET /api/v1/repos HTTP/1.1\r\nHost: localhost\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    assert!(
+        authenticated.starts_with("HTTP/1.1 200 OK"),
+        "{authenticated}"
+    );
     stop(server);
 }
 
