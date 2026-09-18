@@ -151,6 +151,8 @@ fn restored_repository_preserves_identity_and_can_back_up_again() {
         .stderr(contains("checksum or size differs"));
     assert!(!repos.join("tampered.git").exists());
 
+    let parked = temp.path().join("parked-vault.git");
+    std::fs::rename(&hosted, &parked).unwrap();
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
@@ -167,6 +169,7 @@ fn restored_repository_preserves_identity_and_can_back_up_again() {
             .is_empty()
     );
     std::fs::remove_dir_all(repos.join("fallback.git")).unwrap();
+    std::fs::rename(&parked, &hosted).unwrap();
 
     std::fs::write(&bundle, original_bundle).unwrap();
 

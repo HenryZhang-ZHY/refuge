@@ -146,6 +146,7 @@ fn backup_and_restore_round_trip_lfs_objects() {
     let metadata = std::fs::metadata(&archive_path).unwrap();
     assert_eq!(metadata.len(), lfs_artifact.size);
 
+    std::fs::remove_dir_all(&hosted).unwrap();
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)

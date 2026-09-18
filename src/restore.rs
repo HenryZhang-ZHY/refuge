@@ -51,6 +51,7 @@ pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredR
         }
         match prepare_snapshot(config, options.target, snapshot) {
             Ok(prepared) => {
+                repo::ensure_identity_available(config, prepared.repo_id, &destination)?;
                 publish_repository(&prepared.repository, &destination, options.replace)?;
                 return Ok(RestoredRepository {
                     name,
@@ -81,6 +82,7 @@ struct PreparedSnapshot {
     _staging: tempfile::TempDir,
     repository: PathBuf,
     snapshot_id: String,
+    repo_id: uuid::Uuid,
 }
 
 enum CandidateFailure {
@@ -167,6 +169,7 @@ fn prepare_snapshot(
         _staging: staging,
         repository,
         snapshot_id: snapshot.manifest.snapshot_id,
+        repo_id: snapshot.manifest.repo_id,
     })
 }
 

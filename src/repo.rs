@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::{config::Config, git};
 
+#[derive(Debug)]
 pub struct Repository {
     pub path: PathBuf,
     pub id: Uuid,
@@ -18,23 +19,50 @@ pub struct HostedRepository {
 }
 
 pub fn create(config: &Config, name: &str) -> Result<Repository> {
-    validate_name(name)?;
-    let path = path_for(config, name);
-    if path.exists() {
-        bail!("repository already exists: {}", path.display());
-    }
-    git::init_bare(&path)?;
-    finish_setup(path)
+    create_staged(config, name, git::init_bare)
 }
 
 pub fn import(config: &Config, name: &str, source: &Path) -> Result<Repository> {
+    create_staged(config, name, |path| git::clone_mirror(source, path))
+}
+
+fn create_staged(
+    config: &Config,
+    name: &str,
+    initialize: impl FnOnce(&Path) -> Result<()>,
+) -> Result<Repository> {
     validate_name(name)?;
-    let path = path_for(config, name);
-    if path.exists() {
-        bail!("repository already exists: {}", path.display());
+    std::fs::create_dir_all(&config.repos_dir).with_context(|| {
+        format!(
+            "could not create repository directory {}",
+            config.repos_dir.display()
+        )
+    })?;
+    let lock_path = config.repos_dir.join(format!(".refuge-{name}.lock"));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    fs2::FileExt::lock_exclusive(&lock).context("could not lock repository name")?;
+    let destination = path_for(config, name);
+    if destination.exists() {
+        bail!("repository already exists: {}", destination.display());
     }
-    git::clone_mirror(source, &path)?;
-    finish_setup(path)
+    let staging = tempfile::Builder::new()
+        .prefix(".refuge-create-")
+        .tempdir_in(&config.repos_dir)?;
+    let staged = staging.path().join("repository.git");
+    initialize(&staged)?;
+    let id = Uuid::now_v7();
+    configure(&staged, id)?;
+    std::fs::rename(&staged, &destination)
+        .with_context(|| format!("could not publish repository {}", destination.display()))?;
+    Ok(Repository {
+        path: destination,
+        id,
+    })
 }
 
 pub fn find(config: &Config, name: &str) -> Result<PathBuf> {
@@ -159,6 +187,9 @@ pub fn list(config: &Config) -> Result<Vec<HostedRepository>> {
         let Some(name) = file_name.strip_suffix(".git") else {
             continue;
         };
+        if name.starts_with(".refuge-") {
+            continue;
+        }
         let id = Uuid::parse_str(&git::config_get(&path, "refuge.repoid")?).with_context(|| {
             format!("repository {} has an invalid refuge.repoid", path.display())
         })?;
@@ -169,7 +200,31 @@ pub fn list(config: &Config) -> Result<Vec<HostedRepository>> {
         });
     }
     repositories.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut identities = std::collections::HashMap::new();
+    for repository in &repositories {
+        if let Some(previous) = identities.insert(repository.id, &repository.name) {
+            bail!(
+                "repositories {} and {} have duplicate refuge.repoid {}; restore or fork one repository with a new identity",
+                previous,
+                repository.name,
+                repository.id
+            );
+        }
+    }
     Ok(repositories)
+}
+
+pub fn ensure_identity_available(config: &Config, id: Uuid, destination: &Path) -> Result<()> {
+    if let Some(existing) = list(config)?
+        .into_iter()
+        .find(|repository| repository.id == id && repository.path != destination)
+    {
+        bail!(
+            "repository identity {id} is already active as {}; `--as` renames a restore and does not create a new identity",
+            existing.name
+        );
+    }
+    Ok(())
 }
 
 fn path_for(config: &Config, name: &str) -> PathBuf {
@@ -190,12 +245,6 @@ fn validate_name(name: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn finish_setup(path: PathBuf) -> Result<Repository> {
-    let id = Uuid::now_v7();
-    configure(&path, id)?;
-    Ok(Repository { path, id })
 }
 
 pub fn configure(path: &Path, id: Uuid) -> Result<()> {
@@ -230,4 +279,33 @@ pub fn install_hook(repo: &Path) -> Result<()> {
         std::fs::set_permissions(&hook_path, permissions)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_configuration_never_publishes_a_partial_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            repos_dir: temp.path().join("repos"),
+            target_root: temp.path().join("target"),
+            instance_id: Uuid::nil(),
+        };
+
+        let error = create_staged(&config, "broken", |path| {
+            git::init_bare(path)?;
+            bail!("injected configuration failure")
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected"));
+        assert!(!config.repos_dir.join("broken.git").exists());
+        assert!(
+            std::fs::read_dir(&config.repos_dir)
+                .unwrap()
+                .all(|entry| entry.unwrap().path().is_file())
+        );
+    }
 }

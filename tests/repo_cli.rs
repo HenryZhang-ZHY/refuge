@@ -68,6 +68,30 @@ fn repo_create_configures_bare_repository_and_hook() {
 }
 
 #[test]
+fn repository_listing_rejects_duplicate_active_identities() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+    for name in ["first", "second"] {
+        Command::cargo_bin("refuge")
+            .unwrap()
+            .env("REFUGE_CONFIG", &config)
+            .args(["repo", "create", name])
+            .assert()
+            .success();
+    }
+    let id = git_output(&repos.join("first.git"), &["config", "refuge.repoid"]);
+    git_output(&repos.join("second.git"), &["config", "refuge.repoid", &id]);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "list"])
+        .assert()
+        .failure()
+        .stderr(contains("duplicate refuge.repoid"));
+}
+
+#[test]
 fn repo_import_preserves_all_refs() {
     let temp = tempfile::tempdir().unwrap();
     let (config, repos) = initialized(&temp);
