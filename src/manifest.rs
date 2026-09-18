@@ -12,6 +12,34 @@ use crate::git::RefState;
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestIssue {
+    Corrupt,
+    Unsupported,
+}
+
+#[derive(Debug)]
+pub struct ManifestValidationError {
+    pub issue: ManifestIssue,
+    message: String,
+}
+
+impl std::fmt::Display for ManifestValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ManifestValidationError {}
+
+fn unsupported(message: impl Into<String>) -> anyhow::Error {
+    ManifestValidationError {
+        issue: ManifestIssue::Unsupported,
+        message: message.into(),
+    }
+    .into()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ManifestRef {
@@ -112,13 +140,13 @@ pub fn read(path: &Path) -> Result<Manifest> {
 
 pub fn validate(path: &Path, manifest: &Manifest) -> Result<()> {
     if manifest.schema_version != 1 {
-        bail!(
+        return Err(unsupported(format!(
             "unsupported manifest schema version {}",
             manifest.schema_version
-        );
+        )));
     }
     if manifest.encryption.is_some() {
-        bail!("unsupported manifest encryption");
+        return Err(unsupported("unsupported manifest encryption"));
     }
     if manifest.generation == 0 {
         bail!("manifest generation must be at least one");
@@ -199,11 +227,10 @@ fn validate_artifact(
         bail!("artifact key does not match the snapshot layout");
     }
     if artifact.format != expected_format || artifact.format_version != expected_version {
-        bail!(
+        return Err(unsupported(format!(
             "unsupported artifact format {} version {}",
-            artifact.format,
-            artifact.format_version
-        );
+            artifact.format, artifact.format_version
+        )));
     }
     if !valid_checksum(&artifact.checksum) {
         bail!("artifact checksum is not a SHA-256 digest");

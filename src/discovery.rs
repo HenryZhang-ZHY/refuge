@@ -30,6 +30,35 @@ pub struct Snapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogDiagnosticKind {
+    Corrupt,
+    Unsupported,
+    Unreadable,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogDiagnostic {
+    pub path: PathBuf,
+    pub kind: CatalogDiagnosticKind,
+    pub reason: String,
+}
+
+impl CatalogDiagnostic {
+    pub fn snapshot_id(&self) -> Option<&str> {
+        self.path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".manifest.json"))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotCatalog {
+    pub snapshots: Vec<Snapshot>,
+    pub diagnostics: Vec<CatalogDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtectionState {
     Protected { snapshot_id: String },
     Pending,
@@ -41,7 +70,13 @@ pub fn repository_status(
     config: &Config,
     repository: &HostedRepository,
 ) -> Result<ProtectionState> {
-    let snapshots = list_for_repo(&config.target_root, repository.id)?;
+    let catalog = list_for_repo(&config.target_root, repository.id)?;
+    if let Some(diagnostic) = catalog.diagnostics.first() {
+        return Ok(ProtectionState::Corrupt {
+            reason: format!("{}: {}", diagnostic.path.display(), diagnostic.reason),
+        });
+    }
+    let snapshots = catalog.snapshots;
     let Some(latest) = snapshots
         .into_iter()
         .max_by(|left, right| snapshot_order(&left.manifest).cmp(&snapshot_order(&right.manifest)))
@@ -79,38 +114,74 @@ pub fn statuses(
         .collect()
 }
 
-pub fn list_snapshots(target: &Path, filter: Option<&str>) -> Result<Vec<Snapshot>> {
+pub fn list_snapshots(target: &Path, filter: Option<&str>) -> Result<SnapshotCatalog> {
     let root = target.join("refuge/v1/repos");
     if !root.exists() {
-        return Ok(Vec::new());
+        return Ok(SnapshotCatalog::default());
     }
-    let mut snapshots = Vec::new();
-    for entry in std::fs::read_dir(&root)? {
-        let repo_root = entry?.path();
-        if !repo_root.is_dir() {
+    let repo_roots = if let Some(id) = filter.and_then(|value| uuid::Uuid::parse_str(value).ok()) {
+        vec![root.join(id.to_string())]
+    } else {
+        std::fs::read_dir(&root)?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|kind| kind.is_dir())
+                    .map(|_| entry.path())
+            })
+            .collect()
+    };
+    let mut catalog = SnapshotCatalog::default();
+    for repo_root in repo_roots {
+        if !repo_root.exists() {
             continue;
         }
         for path in manifest::paths_in(&repo_root.join("snapshots"))? {
-            let item = inspect(&repo_root, manifest::read(&path)?);
-            if filter.is_none_or(|value| {
-                value == item.manifest.repo_name || value == item.manifest.repo_id.to_string()
-            }) {
-                snapshots.push(item);
+            match manifest::read(&path) {
+                Ok(manifest) => {
+                    let item = inspect(&repo_root, manifest);
+                    if filter.is_none_or(|value| {
+                        value == item.manifest.repo_name
+                            || value == item.manifest.repo_id.to_string()
+                    }) {
+                        catalog.snapshots.push(item);
+                    }
+                }
+                Err(error) => catalog.diagnostics.push(diagnostic(path, &error)),
             }
         }
     }
-    snapshots.sort_by(|left, right| {
+    catalog.snapshots.sort_by(|left, right| {
         snapshot_order(&left.manifest).cmp(&snapshot_order(&right.manifest))
     });
-    Ok(snapshots)
+    catalog
+        .diagnostics
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(catalog)
 }
 
-fn list_for_repo(target: &Path, repo_id: uuid::Uuid) -> Result<Vec<Snapshot>> {
-    let repo_root = target.join("refuge/v1/repos").join(repo_id.to_string());
-    manifest::paths_in(&repo_root.join("snapshots"))?
-        .into_iter()
-        .map(|path| Ok(inspect(&repo_root, manifest::read(&path)?)))
-        .collect()
+fn list_for_repo(target: &Path, repo_id: uuid::Uuid) -> Result<SnapshotCatalog> {
+    list_snapshots(target, Some(&repo_id.to_string()))
+}
+
+fn diagnostic(path: PathBuf, error: &anyhow::Error) -> CatalogDiagnostic {
+    let kind = if let Some(validation) = error.downcast_ref::<manifest::ManifestValidationError>() {
+        match validation.issue {
+            manifest::ManifestIssue::Corrupt => CatalogDiagnosticKind::Corrupt,
+            manifest::ManifestIssue::Unsupported => CatalogDiagnosticKind::Unsupported,
+        }
+    } else if error.downcast_ref::<std::io::Error>().is_some() {
+        CatalogDiagnosticKind::Unreadable
+    } else {
+        CatalogDiagnosticKind::Corrupt
+    };
+    CatalogDiagnostic {
+        path,
+        kind,
+        reason: format!("{error:#}"),
+    }
 }
 
 fn inspect(repo_root: &Path, manifest: Manifest) -> Snapshot {
@@ -159,13 +230,25 @@ fn snapshot_health(repo_root: &Path, manifest: &Manifest) -> SnapshotHealth {
 /// present and valid, or `Some(Corrupt(..))` describing the problem.
 fn validate_present(repo_root: &Path, artifact: &manifest::Artifact) -> Option<SnapshotHealth> {
     match artifact_path_from_repo(repo_root, &artifact.key) {
-        Ok(path) => match std::fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() && metadata.len() == artifact.size => None,
-            Ok(_) => Some(SnapshotHealth::Corrupt("artifact size differs".to_owned())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Ok(path) => match (
+            std::fs::symlink_metadata(repo_root.join("snapshots")),
+            std::fs::symlink_metadata(&path),
+        ) {
+            (Ok(directory), _) if !directory.file_type().is_dir() => Some(SnapshotHealth::Corrupt(
+                "snapshot directory is not a real directory".to_owned(),
+            )),
+            (Ok(_), Ok(metadata))
+                if metadata.file_type().is_file() && metadata.len() == artifact.size =>
+            {
+                None
+            }
+            (Ok(_), Ok(_)) => Some(SnapshotHealth::Corrupt(
+                "artifact is not a regular file or its size differs".to_owned(),
+            )),
+            (Err(error), _) | (_, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 Some(SnapshotHealth::Corrupt("artifact is missing".to_owned()))
             }
-            Err(error) => Some(SnapshotHealth::Corrupt(format!(
+            (Err(error), _) | (_, Err(error)) => Some(SnapshotHealth::Corrupt(format!(
                 "artifact cannot be read: {error}"
             ))),
         },

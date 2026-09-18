@@ -172,3 +172,65 @@ fn snapshot_listing_reports_a_missing_artifact_as_corrupt() {
         .success()
         .stdout(contains("corrupt"));
 }
+
+#[test]
+fn invalid_manifest_does_not_block_an_unrelated_repository() {
+    let env = TestEnvironment::new();
+    env.initialize();
+    for name in ["healthy", "damaged"] {
+        env.refuge()
+            .args(["repo", "create", name])
+            .assert()
+            .success();
+    }
+    let damaged = env.repos.join("damaged.git");
+    let damaged_id = env.git(&damaged, &["config", "refuge.repoid"], false);
+    let damaged_manifest = manifests(&env.target, &damaged_id).pop().unwrap();
+    std::fs::write(&damaged_manifest, b"not JSON").unwrap();
+
+    env.refuge()
+        .args(["snapshots", "list", "healthy"])
+        .assert()
+        .success()
+        .stdout(contains("healthy"))
+        .stderr(contains(damaged_manifest.display().to_string()));
+}
+
+#[test]
+fn explicitly_selected_unsupported_manifest_is_rejected() {
+    let env = TestEnvironment::new();
+    env.initialize();
+    env.refuge()
+        .args(["repo", "create", "future"])
+        .assert()
+        .success();
+    let hosted = env.repos.join("future.git");
+    let repo_id = env.git(&hosted, &["config", "refuge.repoid"], false);
+    let path = manifests(&env.target, &repo_id).pop().unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["schema_version"] = 2.into();
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let snapshot_id = path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_suffix(".manifest.json")
+        .unwrap();
+
+    env.refuge()
+        .args([
+            "restore",
+            &repo_id,
+            "--snapshot",
+            snapshot_id,
+            "--as",
+            "rejected",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("Unsupported"))
+        .stderr(contains("schema version 2"));
+    assert!(!env.repos.join("rejected.git").exists());
+}

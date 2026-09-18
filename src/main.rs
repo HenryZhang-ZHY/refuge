@@ -356,13 +356,22 @@ fn run() -> Result<()> {
         } => {
             let config = refuge::config::Config::load()?;
             let target = target.as_deref().unwrap_or(&config.target_root);
-            for snapshot in refuge::discovery::list_snapshots(target, name_or_repo_id.as_deref())? {
+            let catalog = refuge::discovery::list_snapshots(target, name_or_repo_id.as_deref())?;
+            for snapshot in catalog.snapshots {
                 println!(
                     "{} {} generation {} {}",
                     snapshot.manifest.repo_name,
                     snapshot.manifest.snapshot_id,
                     snapshot.manifest.generation,
                     snapshot.health
+                );
+            }
+            for diagnostic in catalog.diagnostics {
+                eprintln!(
+                    "{} {:?}: {}",
+                    diagnostic.path.display(),
+                    diagnostic.kind,
+                    diagnostic.reason
                 );
             }
         }

@@ -23,8 +23,8 @@ pub struct RestoredRepository {
 }
 
 pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredRepository> {
-    let snapshots = discovery::list_snapshots(options.target, Some(options.selector))?;
-    let snapshot = select_snapshot(snapshots, options.snapshot_id)?;
+    let catalog = discovery::list_snapshots(options.target, Some(options.selector))?;
+    let snapshot = select_snapshot(catalog, options.snapshot_id)?;
     let name = options
         .as_name
         .unwrap_or(&snapshot.manifest.repo_name)
@@ -100,12 +100,37 @@ fn extract_lfs_archive(archive: &Path, repo: &Path) -> Result<()> {
     backup::verify_lfs_objects(&destination)
 }
 
-fn select_snapshot(snapshots: Vec<Snapshot>, selected: Option<&str>) -> Result<Snapshot> {
-    let mut matching: Vec<_> = snapshots
+fn select_snapshot(
+    catalog: discovery::SnapshotCatalog,
+    selected: Option<&str>,
+) -> Result<Snapshot> {
+    let mut matching: Vec<_> = catalog
+        .snapshots
         .into_iter()
         .filter(|snapshot| selected.is_none_or(|id| snapshot.manifest.snapshot_id == id))
         .collect();
     if matching.is_empty() {
+        if let Some(id) = selected
+            && let Some(diagnostic) = catalog
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.snapshot_id() == Some(id))
+        {
+            bail!(
+                "selected snapshot is {:?}: {}",
+                diagnostic.kind,
+                diagnostic.reason
+            );
+        }
+        if !catalog.diagnostics.is_empty() {
+            let reasons = catalog
+                .diagnostics
+                .iter()
+                .map(|item| format!("{}: {}", item.path.display(), item.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!("no valid snapshot found; invalid manifests: {reasons}");
+        }
         bail!("no matching snapshot found");
     }
     let first_repo = matching[0].manifest.repo_id;
