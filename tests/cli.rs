@@ -81,3 +81,37 @@ fn init_rejects_repository_directory_inside_onedrive() {
         .failure()
         .stderr(contains("must not be inside a OneDrive directory"));
 }
+
+#[test]
+fn init_refuses_to_replace_an_existing_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("config.toml");
+    let repos = temp.path().join("repos");
+    let target = temp.path().join("target");
+    let arguments = [
+        "init",
+        "--repos",
+        repos.to_str().unwrap(),
+        "--target",
+        target.to_str().unwrap(),
+    ];
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config_path)
+        .args(arguments)
+        .assert()
+        .success();
+    let original = Config::load_from(&config_path).unwrap();
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config_path)
+        .args(arguments)
+        .assert()
+        .code(2)
+        .stderr(contains("Refuge is already initialized"))
+        .stderr(contains("existing configuration was not changed"));
+
+    assert_eq!(Config::load_from(&config_path).unwrap(), original);
+}

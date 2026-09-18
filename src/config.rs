@@ -59,6 +59,12 @@ pub fn default_path() -> Result<PathBuf> {
 
 pub fn initialize(repos: Option<PathBuf>, target: Option<PathBuf>) -> Result<(Config, PathBuf)> {
     let config_path = default_path()?;
+    if config_path.exists() {
+        bail!(
+            "Refuge is already initialized at {}; existing configuration was not changed. Remove that file only when intentionally creating a new Refuge instance.",
+            config_path.display()
+        );
+    }
     let base = config_path
         .parent()
         .context("config path has no parent directory")?;
