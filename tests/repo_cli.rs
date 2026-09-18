@@ -166,3 +166,103 @@ fn repo_list_and_clone_make_hosted_repositories_available_as_working_copies() {
         "one\n"
     );
 }
+
+#[test]
+fn connect_and_dot_selector_operate_on_the_current_working_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git_output(&work, &["init", "--initial-branch=main"]);
+    git_output(&work, &["config", "user.name", "Refuge Test"]);
+    git_output(&work, &["config", "user.email", "refuge@example.invalid"]);
+    std::fs::write(work.join("entry.txt"), "one\n").unwrap();
+    git_output(&work, &["add", "entry.txt"]);
+    git_output(&work, &["commit", "-m", "initial"]);
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "import", "notes", work.to_str().unwrap()])
+        .assert()
+        .success();
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .current_dir(&work)
+        .args(["repo", "connect", "notes"])
+        .assert()
+        .success()
+        .stdout(contains("connected remote `refuge`"));
+    // Reconnecting the same remote is deliberately idempotent.
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .current_dir(&work)
+        .args(["repo", "connect", "notes"])
+        .assert()
+        .success();
+    assert_eq!(
+        git_output(&work, &["remote", "get-url", "refuge"]),
+        repos.join("notes.git").display().to_string()
+    );
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .current_dir(&work)
+        .args(["repo", "view"])
+        .assert()
+        .success()
+        .stdout(contains("Name: notes"))
+        .stdout(contains("Remote: refuge"));
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .current_dir(&work)
+        .args(["backup", "."])
+        .assert()
+        .success();
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .current_dir(&work)
+        .args(["status", "."])
+        .assert()
+        .success()
+        .stdout(contains("notes: Protected locally"));
+}
+
+#[test]
+fn connect_refuses_to_replace_an_existing_remote_without_the_flag() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, _) = initialized(&temp);
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "create", "notes"])
+        .assert()
+        .success();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git_output(&work, &["init", "--initial-branch=main"]);
+    git_output(&work, &["remote", "add", "refuge", "/somewhere/else"]);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .current_dir(&work)
+        .args(["repo", "connect", "notes"])
+        .assert()
+        .failure()
+        .stderr(contains("already exists"))
+        .stderr(contains("--replace"));
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .current_dir(&work)
+        .args(["repo", "connect", "notes", "--replace"])
+        .assert()
+        .success();
+}

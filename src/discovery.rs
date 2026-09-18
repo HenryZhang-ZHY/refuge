@@ -66,13 +66,7 @@ pub fn statuses(
     selected_name: Option<&str>,
 ) -> Result<Vec<(HostedRepository, ProtectionState)>> {
     let repositories = if let Some(name) = selected_name {
-        let path = repo::find(config, name)?;
-        let id = uuid::Uuid::parse_str(&git::config_get(&path, "refuge.repoid")?)?;
-        vec![HostedRepository {
-            name: name.to_owned(),
-            path,
-            id,
-        }]
+        vec![repo::resolve(config, name)?]
     } else {
         repo::list(config)?
     };

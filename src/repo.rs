@@ -47,11 +47,75 @@ pub fn find(config: &Config, name: &str) -> Result<PathBuf> {
 }
 
 pub fn resolve(config: &Config, selector: &str) -> Result<HostedRepository> {
+    if selector == "." {
+        return Ok(current(config)?.0);
+    }
     let repositories = list(config)?;
     repositories
         .into_iter()
         .find(|repository| repository.name == selector || repository.id.to_string() == selector)
         .with_context(|| format!("repository does not exist: {selector}"))
+}
+
+pub fn current(config: &Config) -> Result<(HostedRepository, String)> {
+    let cwd = std::env::current_dir().context("could not read current directory")?;
+    let worktree =
+        git::top_level(&cwd).context("current directory is not in a Git working tree")?;
+    let repositories = list(config)?;
+    let mut matches = Vec::new();
+    for (remote, url) in git::remotes(&worktree)? {
+        for repository in &repositories {
+            if remote_matches(&worktree, &url, &repository.path) {
+                matches.push((repository.clone(), remote.clone()));
+            }
+        }
+    }
+    matches.sort_by(|left, right| left.0.name.cmp(&right.0.name));
+    matches.dedup_by(|left, right| left.0.id == right.0.id && left.1 == right.1);
+    match matches.len() {
+        0 => bail!("current Git repository is not connected to a hosted Refuge repository"),
+        1 => Ok(matches.pop().expect("one current repository match")),
+        _ => bail!("current Git repository is connected to multiple hosted Refuge repositories"),
+    }
+}
+
+pub fn connect(
+    config: &Config,
+    selector: &str,
+    remote_name: &str,
+    replace: bool,
+) -> Result<(HostedRepository, PathBuf)> {
+    let repository = resolve(config, selector)?;
+    let cwd = std::env::current_dir().context("could not read current directory")?;
+    let worktree =
+        git::top_level(&cwd).context("current directory is not in a Git working tree")?;
+    let key = format!("remote.{remote_name}.url");
+    match git::config_get_optional(&worktree, &key)? {
+        None => git::remote_add(&worktree, remote_name, &repository.path)?,
+        Some(url) if remote_matches(&worktree, &url, &repository.path) => {}
+        Some(_) if replace => git::remote_set_url(&worktree, remote_name, &repository.path)?,
+        Some(_) => bail!(
+            "remote `{remote_name}` already exists with a different URL; pass --replace to update it"
+        ),
+    }
+    Ok((repository, worktree))
+}
+
+fn remote_matches(worktree: &Path, url: &str, hosted: &Path) -> bool {
+    if url == hosted.to_string_lossy() {
+        return true;
+    }
+    let local = url.strip_prefix("file://").unwrap_or(url);
+    let path = PathBuf::from(local);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        worktree.join(path)
+    };
+    match (dunce::canonicalize(path), dunce::canonicalize(hosted)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 pub fn destination(config: &Config, name: &str) -> Result<PathBuf> {

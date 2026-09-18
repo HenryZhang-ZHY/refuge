@@ -186,6 +186,59 @@ pub fn config_get(repo: &Path, key: &str) -> Result<String> {
         .to_owned())
 }
 
+pub fn config_get_optional(repo: &Path, key: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["-c", "safe.bareRepository=all"])
+        .arg("-C")
+        .arg(repo)
+        .args(["config", "--get", key])
+        .output()
+        .with_context(|| format!("could not read git config {key}"))?;
+    match output.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8(output.stdout)
+                .context("git returned non-UTF-8 config data")?
+                .trim()
+                .to_owned(),
+        )),
+        Some(1) => Ok(None),
+        _ => Err(output_error(&["config", "--get", key], &output)),
+    }
+}
+
+pub fn top_level(repo: &Path) -> Result<std::path::PathBuf> {
+    let output = run(Some(repo), &["rev-parse", "--show-toplevel"])?;
+    Ok(std::path::PathBuf::from(
+        String::from_utf8(output.stdout)
+            .context("git returned a non-UTF-8 working tree path")?
+            .trim(),
+    ))
+}
+
+pub fn remotes(repo: &Path) -> Result<Vec<(String, String)>> {
+    let output = run(Some(repo), &["remote"])?;
+    let names = String::from_utf8(output.stdout).context("git returned non-UTF-8 remote names")?;
+    names
+        .lines()
+        .map(|name| {
+            let url = config_get(repo, &format!("remote.{name}.url"))?;
+            Ok((name.to_owned(), url))
+        })
+        .collect()
+}
+
+pub fn remote_add(repo: &Path, name: &str, url: &Path) -> Result<()> {
+    let url = url.to_str().context("remote path is not valid UTF-8")?;
+    run(Some(repo), &["remote", "add", name, url])?;
+    Ok(())
+}
+
+pub fn remote_set_url(repo: &Path, name: &str, url: &Path) -> Result<()> {
+    let url = url.to_str().context("remote path is not valid UTF-8")?;
+    run(Some(repo), &["remote", "set-url", name, url])?;
+    Ok(())
+}
+
 pub fn set_symbolic_head(repo: &Path, target: &str) -> Result<()> {
     run(Some(repo), &["symbolic-ref", "HEAD", target])?;
     Ok(())

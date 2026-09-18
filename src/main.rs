@@ -150,6 +150,25 @@ enum RepoCommands {
         #[arg(last = true, allow_hyphen_values = true, value_name = "GIT_ARGS")]
         git_args: Vec<OsString>,
     },
+    /// Connect the current working copy to a hosted repository.
+    #[command(after_help = "Example:\n  refuge repo connect notes")]
+    Connect {
+        /// Hosted repository name or stable UUID.
+        #[arg(value_name = "NAME_OR_REPO_ID")]
+        selector: String,
+        /// Name of the Git remote to add.
+        #[arg(long, default_value = "refuge", value_name = "NAME")]
+        remote: String,
+        /// Replace an existing remote that has a different URL.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Show a hosted repository and its protection state.
+    View {
+        /// Repository name, stable UUID, or `.` for the current working copy.
+        #[arg(value_name = "NAME_OR_REPO_ID", default_value = ".")]
+        selector: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -238,12 +257,47 @@ fn run() -> Result<()> {
                     )?;
                     println!("cloned {} to {}", repository.name, directory.display());
                 }
+                RepoCommands::Connect {
+                    selector,
+                    remote,
+                    replace,
+                } => {
+                    let (repository, _) =
+                        refuge::repo::connect(&config, &selector, &remote, replace)?;
+                    println!(
+                        "connected remote `{remote}` to {} ({})\nNext: git push {remote} main",
+                        repository.name, repository.id
+                    );
+                }
+                RepoCommands::View { selector } => {
+                    let (repository, remote) = if selector == "." {
+                        let (repository, remote) = refuge::repo::current(&config)?;
+                        (repository, Some(remote))
+                    } else {
+                        (refuge::repo::resolve(&config, &selector)?, None)
+                    };
+                    let state = refuge::discovery::repository_status(&config, &repository)?;
+                    let head = refuge::git::ref_state(&repository.path)?
+                        .head
+                        .unwrap_or_else(|| "(detached)".to_owned());
+                    println!("Name: {}", repository.name);
+                    println!("ID: {}", repository.id);
+                    println!("Repository: {}", repository.path.display());
+                    if let Some(remote) = remote {
+                        println!("Remote: {remote}");
+                    }
+                    println!("Default branch: {head}");
+                    println!("Status: {}", protection_description(state));
+                }
             }
         }
         Commands::Backup { name, repo_path } => {
             let config = refuge::config::Config::load()?;
             let manifest = match (name, repo_path) {
-                (Some(name), None) => refuge::backup::backup_named(&config, &name)?,
+                (Some(selector), None) => {
+                    let repository = refuge::repo::resolve(&config, &selector)?;
+                    refuge::backup::backup_path(&config, &repository.path)?
+                }
                 (None, Some(path)) => refuge::backup::backup_path(&config, &path)?,
                 _ => unreachable!("clap validates backup arguments"),
             };
@@ -252,20 +306,7 @@ fn run() -> Result<()> {
         Commands::Status { name } => {
             let config = refuge::config::Config::load()?;
             for (repository, state) in refuge::discovery::statuses(&config, name.as_deref())? {
-                let description = match state {
-                    refuge::discovery::ProtectionState::Protected { snapshot_id } => {
-                        format!(
-                            "Protected locally ({snapshot_id})\n  Cloud upload is not verified by Refuge"
-                        )
-                    }
-                    refuge::discovery::ProtectionState::Pending => {
-                        "Pending (run `refuge backup`)".to_owned()
-                    }
-                    refuge::discovery::ProtectionState::Unprotected => "Unprotected".to_owned(),
-                    refuge::discovery::ProtectionState::Corrupt { reason } => {
-                        format!("Unprotected (corrupt: {reason})")
-                    }
-                };
+                let description = protection_description(state);
                 println!("{}: {description}", repository.name);
             }
         }
@@ -349,5 +390,18 @@ fn print_protected(manifest: &refuge::manifest::Manifest) {
             "protected {} {} refs {} bytes",
             manifest.snapshot_id, ref_count, size
         ),
+    }
+}
+
+fn protection_description(state: refuge::discovery::ProtectionState) -> String {
+    match state {
+        refuge::discovery::ProtectionState::Protected { snapshot_id } => {
+            format!("Protected locally ({snapshot_id})\n  Cloud upload is not verified by Refuge")
+        }
+        refuge::discovery::ProtectionState::Pending => "Pending (run `refuge backup`)".to_owned(),
+        refuge::discovery::ProtectionState::Unprotected => "Unprotected".to_owned(),
+        refuge::discovery::ProtectionState::Corrupt { reason } => {
+            format!("Unprotected (corrupt: {reason})")
+        }
     }
 }
