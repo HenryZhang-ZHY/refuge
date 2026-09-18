@@ -28,6 +28,15 @@ pub fn backup_named(config: &Config, name: &str) -> Result<Manifest> {
 }
 
 pub fn backup_path(config: &Config, path: &Path) -> Result<Manifest> {
+    backup_path_at(config, path, OffsetDateTime::now_utc(), || {})
+}
+
+fn backup_path_at(
+    config: &Config,
+    path: &Path,
+    now: OffsetDateTime,
+    after_bundle_created: impl Fn(),
+) -> Result<Manifest> {
     let repo_id = Uuid::parse_str(&git::config_get(path, "refuge.repoid")?)
         .context("repository has an invalid refuge.repoid")?;
     let repo_name = repository_name(path)?;
@@ -56,7 +65,6 @@ pub fn backup_path(config: &Config, path: &Path) -> Result<Manifest> {
         .with_context(|| format!("could not create {}", snapshots.display()))?;
 
     let generation = next_generation(&snapshots)?;
-    let now = OffsetDateTime::now_utc();
     let created_at = now.format(&Rfc3339).context("could not format time")?;
     let compact = now
         .format(format_description!(
@@ -66,10 +74,29 @@ pub fn backup_path(config: &Config, path: &Path) -> Result<Manifest> {
     let instance = config.instance_id.simple().to_string();
     let snapshot_id = format!("{compact}-g{generation}-{}", &instance[..8]);
 
-    let staged_bundle = staging.join(format!("{snapshot_id}.bundle"));
+    // A snapshot id is only unique within one repository namespace. Give
+    // every operation its own exclusively created directory so repositories
+    // with the same generation and timestamp can never share intermediate
+    // bundle or LFS paths.
+    let operation = tempfile::Builder::new()
+        .prefix(&format!("{repo_id}-"))
+        .tempdir_in(&staging)
+        .with_context(|| {
+            format!(
+                "could not create staging directory in {}",
+                staging.display()
+            )
+        })?;
+    let staged_bundle = operation.path().join(format!("{snapshot_id}.bundle"));
 
-    let (state, artifact) = create_artifact(path, &snapshots, &snapshot_id, &staged_bundle)?;
-    let staged_lfs = staging.join(format!("{snapshot_id}.lfs.tar"));
+    let (state, artifact) = create_artifact(
+        path,
+        &snapshots,
+        &snapshot_id,
+        &staged_bundle,
+        after_bundle_created,
+    )?;
+    let staged_lfs = operation.path().join(format!("{snapshot_id}.lfs.tar"));
     let lfs_artifact = create_lfs_artifact(path, &snapshots, &snapshot_id, &staged_lfs)?;
     write_repo_envelope(&repository_root, repo_id, &repo_name, &created_at)?;
 
@@ -100,6 +127,7 @@ fn create_artifact(
     snapshots: &Path,
     snapshot_id: &str,
     staged_bundle: &Path,
+    after_bundle_created: impl Fn(),
 ) -> Result<(RefState, Option<Artifact>)> {
     let mut state = git::ref_state(repo_path)?;
     if state.refs.is_empty() {
@@ -111,6 +139,7 @@ fn create_artifact(
             fs::remove_file(staged_bundle)?;
         }
         git::bundle_create(repo_path, staged_bundle)?;
+        after_bundle_created();
         git::bundle_verify(repo_path, staged_bundle)?;
         if git::bundle_list_heads(staged_bundle)? == state.refs {
             let (checksum, size) = checksum(staged_bundle)?;
@@ -347,4 +376,100 @@ fn repository_name(path: &Path) -> Result<String> {
         .strip_suffix(".git")
         .unwrap_or(file_name)
         .to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    fn repository(root: &Path, name: &str, id: Uuid, content: &str) -> PathBuf {
+        let path = root.join(format!("{name}.git"));
+        git::init_bare(&path).unwrap();
+        git::config_set(&path, "refuge.repoid", &id.to_string()).unwrap();
+
+        let input = root.join(format!("{name}.txt"));
+        fs::write(&input, content).unwrap();
+        let output = Command::new("git")
+            .args(["-c", "safe.bareRepository=all"])
+            .arg("-C")
+            .arg(&path)
+            .args(["hash-object", "-w"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let oid = String::from_utf8(output.stdout).unwrap();
+        let output = Command::new("git")
+            .args(["-c", "safe.bareRepository=all"])
+            .arg("-C")
+            .arg(&path)
+            .args(["update-ref", "refs/notes/snapshot", oid.trim()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        path
+    }
+
+    #[test]
+    fn simultaneous_repositories_with_the_same_snapshot_id_use_isolated_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let repos = temp.path().join("repos");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&repos).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let config = Config {
+            repos_dir: repos.clone(),
+            target_root: target.clone(),
+            instance_id: Uuid::nil(),
+        };
+        let first = repository(&repos, "first", Uuid::now_v7(), "first repository");
+        let second = repository(&repos, "second", Uuid::now_v7(), "second repository");
+        let barrier = Arc::new(Barrier::new(2));
+        let now = OffsetDateTime::UNIX_EPOCH;
+
+        let handles: Vec<_> = [first, second]
+            .into_iter()
+            .map(|path| {
+                let config = config.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    backup_path_at(&config, &path, now, || {
+                        barrier.wait();
+                    })
+                })
+            })
+            .collect();
+        let manifests: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect();
+
+        assert_eq!(manifests[0].snapshot_id, manifests[1].snapshot_id);
+        for manifest in manifests {
+            let expected_refs = manifest
+                .refs
+                .iter()
+                .filter_map(|(name, value)| match value {
+                    crate::manifest::ManifestRef::Object(oid) => Some((name.clone(), oid.clone())),
+                    crate::manifest::ManifestRef::Symbolic { .. } => None,
+                })
+                .collect();
+            let artifact = manifest.artifact.unwrap();
+            let bundle = target
+                .join("refuge/v1/repos")
+                .join(manifest.repo_id.to_string())
+                .join(artifact.key);
+            assert_eq!(git::bundle_list_heads(&bundle).unwrap(), expected_refs);
+        }
+
+        let staging = target.join(".refuge-staging");
+        assert!(
+            fs::read_dir(staging)
+                .unwrap()
+                .all(|entry| entry.unwrap().path().is_file())
+        );
+    }
 }
