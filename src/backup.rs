@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::git::{self, RefState};
-use crate::manifest::{Artifact, Manifest};
+use crate::manifest::{self, Artifact, Manifest};
 use crate::repo;
 
 #[derive(Serialize)]
@@ -157,29 +157,13 @@ fn checksum(path: &Path) -> Result<(String, u64)> {
 
 fn next_generation(snapshots: &Path) -> Result<u64> {
     let mut generation = 0;
-    for path in manifest_paths(snapshots)? {
-        let manifest: Manifest = serde_json::from_slice(&fs::read(&path)?)
-            .with_context(|| format!("invalid manifest {}", path.display()))?;
+    for path in manifest::paths_in(snapshots)? {
+        let manifest = manifest::read(&path)?;
         generation = generation.max(manifest.generation);
     }
     generation
         .checked_add(1)
         .context("snapshot generation overflow")
-}
-
-pub fn manifest_paths(snapshots: &Path) -> Result<Vec<PathBuf>> {
-    if !snapshots.exists() {
-        return Ok(Vec::new());
-    }
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(snapshots)? {
-        let path = entry?.path();
-        if path.to_string_lossy().ends_with(".manifest.json") {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    Ok(paths)
 }
 
 fn write_repo_envelope(root: &Path, id: Uuid, name: &str, created_at: &str) -> Result<()> {

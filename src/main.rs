@@ -35,6 +35,13 @@ enum Commands {
         #[arg(long)]
         repo_path: Option<PathBuf>,
     },
+    /// Show whether hosted repositories match their newest snapshots.
+    Status { name: Option<String> },
+    /// Inspect published snapshots.
+    Snapshots {
+        #[command(subcommand)]
+        command: SnapshotCommands,
+    },
     #[command(hide = true)]
     Hook {
         #[command(subcommand)]
@@ -53,6 +60,16 @@ enum RepoCommands {
 #[derive(Debug, Subcommand)]
 enum HookCommands {
     PostReceive,
+}
+
+#[derive(Debug, Subcommand)]
+enum SnapshotCommands {
+    /// List snapshot manifests and validate artifact presence and size.
+    List {
+        name_or_repo_id: Option<String>,
+        #[arg(long)]
+        target: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -82,6 +99,43 @@ fn main() -> Result<()> {
                 _ => unreachable!("clap validates backup arguments"),
             };
             print_protected(&manifest);
+        }
+        Some(Commands::Status { name }) => {
+            let config = refuge::config::Config::load()?;
+            for (repository, state) in refuge::discovery::statuses(&config, name.as_deref())? {
+                let description = match state {
+                    refuge::discovery::ProtectionState::Protected { snapshot_id } => {
+                        format!("Protected ({snapshot_id})")
+                    }
+                    refuge::discovery::ProtectionState::Pending => {
+                        "Pending (run `refuge backup`)".to_owned()
+                    }
+                    refuge::discovery::ProtectionState::Unprotected => "Unprotected".to_owned(),
+                    refuge::discovery::ProtectionState::Corrupt { reason } => {
+                        format!("Unprotected (corrupt: {reason})")
+                    }
+                };
+                println!("{}: {description}", repository.name);
+            }
+        }
+        Some(Commands::Snapshots {
+            command:
+                SnapshotCommands::List {
+                    name_or_repo_id,
+                    target,
+                },
+        }) => {
+            let config = refuge::config::Config::load()?;
+            let target = target.as_deref().unwrap_or(&config.target_root);
+            for snapshot in refuge::discovery::list_snapshots(target, name_or_repo_id.as_deref())? {
+                println!(
+                    "{} {} generation {} {}",
+                    snapshot.manifest.repo_name,
+                    snapshot.manifest.snapshot_id,
+                    snapshot.manifest.generation,
+                    snapshot.health
+                );
+            }
         }
         Some(Commands::Hook {
             command: HookCommands::PostReceive,

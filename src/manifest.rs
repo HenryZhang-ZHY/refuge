@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -62,4 +64,24 @@ impl Manifest {
             _ => None,
         }
     }
+}
+
+pub fn paths_in(snapshots: &Path) -> Result<Vec<PathBuf>> {
+    if !snapshots.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(snapshots)? {
+        let path = entry?.path();
+        if path.to_string_lossy().ends_with(".manifest.json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+pub fn read(path: &Path) -> Result<Manifest> {
+    serde_json::from_slice(&std::fs::read(path)?)
+        .with_context(|| format!("invalid manifest {}", path.display()))
 }

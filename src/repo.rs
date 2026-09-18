@@ -10,6 +10,13 @@ pub struct Repository {
     pub id: Uuid,
 }
 
+#[derive(Debug, Clone)]
+pub struct HostedRepository {
+    pub name: String,
+    pub path: PathBuf,
+    pub id: Uuid,
+}
+
 pub fn create(config: &Config, name: &str) -> Result<Repository> {
     validate_name(name)?;
     let path = path_for(config, name);
@@ -37,6 +44,32 @@ pub fn find(config: &Config, name: &str) -> Result<PathBuf> {
         bail!("repository does not exist: {name}");
     }
     Ok(path)
+}
+
+pub fn list(config: &Config) -> Result<Vec<HostedRepository>> {
+    let mut repositories = Vec::new();
+    for entry in std::fs::read_dir(&config.repos_dir)? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(name) = file_name.strip_suffix(".git") else {
+            continue;
+        };
+        let id = Uuid::parse_str(&git::config_get(&path, "refuge.repoid")?).with_context(|| {
+            format!("repository {} has an invalid refuge.repoid", path.display())
+        })?;
+        repositories.push(HostedRepository {
+            name: name.to_owned(),
+            path,
+            id,
+        });
+    }
+    repositories.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(repositories)
 }
 
 fn path_for(config: &Config, name: &str) -> PathBuf {

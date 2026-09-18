@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 use assert_cmd::Command;
+use predicates::str::contains;
 use refuge::manifest::Manifest;
 
 fn git(repo: &Path, args: &[&str], config: Option<&Path>) -> String {
@@ -116,6 +117,14 @@ fn empty_repository_backup_publishes_manifest_without_artifact() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
+        .args(["status", "empty"])
+        .assert()
+        .success()
+        .stdout(contains("Unprotected"));
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
         .args(["backup", "empty"])
         .assert()
         .success();
@@ -125,4 +134,80 @@ fn empty_repository_backup_publishes_manifest_without_artifact() {
     assert_eq!(manifest.refs.len(), 1);
     assert_eq!(manifest.head(), Some("refs/heads/main"));
     assert!(manifest.artifact.is_none());
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["status", "empty"])
+        .assert()
+        .success()
+        .stdout(contains("Protected"));
+
+    let blob_path = temp.path().join("new-object");
+    std::fs::write(&blob_path, "a ref can point to a blob\n").unwrap();
+    let oid = git(
+        &hosted,
+        &["hash-object", "-w", blob_path.to_str().unwrap()],
+        None,
+    );
+    git(&hosted, &["update-ref", "refs/notes/pending", &oid], None);
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["status", "empty"])
+        .assert()
+        .success()
+        .stdout(contains("Pending"));
+}
+
+#[test]
+fn snapshot_listing_reports_a_missing_artifact_as_corrupt() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos, target) = initialized(&temp);
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "create", "documents"])
+        .assert()
+        .success();
+    let hosted = repos.join("documents.git");
+    let repo_id = git(&hosted, &["config", "refuge.repoid"], None);
+
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "--initial-branch=main"], None);
+    git(&work, &["config", "user.name", "Refuge Test"], None);
+    git(
+        &work,
+        &["config", "user.email", "refuge@example.invalid"],
+        None,
+    );
+    std::fs::write(work.join("note.md"), "remember this\n").unwrap();
+    git(&work, &["add", "note.md"], None);
+    git(&work, &["commit", "-m", "add note"], None);
+    git(
+        &work,
+        &["remote", "add", "refuge", hosted.to_str().unwrap()],
+        None,
+    );
+    git(&work, &["push", "refuge", "main"], Some(&config));
+
+    let path = manifests(&target, &repo_id).pop().unwrap();
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let artifact = manifest.artifact.unwrap();
+    std::fs::remove_file(
+        target
+            .join("refuge/v1/repos")
+            .join(repo_id)
+            .join(artifact.key),
+    )
+    .unwrap();
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["snapshots", "list", "documents"])
+        .assert()
+        .success()
+        .stdout(contains("corrupt"));
 }
