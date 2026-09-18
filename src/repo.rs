@@ -38,14 +38,7 @@ fn create_staged(
             config.repos_dir.display()
         )
     })?;
-    let lock_path = config.repos_dir.join(format!(".refuge-{name}.lock"));
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)?;
-    fs2::FileExt::lock_exclusive(&lock).context("could not lock repository name")?;
+    let _lock = lock_name(config, name)?;
     let destination = path_for(config, name);
     if destination.exists() {
         bail!("repository already exists: {}", destination.display());
@@ -225,6 +218,31 @@ pub fn ensure_identity_available(config: &Config, id: Uuid, destination: &Path) 
         );
     }
     Ok(())
+}
+
+pub(crate) fn lock_name(config: &Config, name: &str) -> Result<std::fs::File> {
+    lock_file(
+        &config.repos_dir.join(format!(".refuge-name-{name}.lock")),
+        "repository name",
+    )
+}
+
+pub(crate) fn lock_identity(config: &Config, id: Uuid) -> Result<std::fs::File> {
+    lock_file(
+        &config.repos_dir.join(format!(".refuge-identity-{id}.lock")),
+        "repository identity",
+    )
+}
+
+fn lock_file(path: &Path, description: &str) -> Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    fs2::FileExt::lock_exclusive(&lock).with_context(|| format!("could not lock {description}"))?;
+    Ok(lock)
 }
 
 fn path_for(config: &Config, name: &str) -> PathBuf {

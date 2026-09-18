@@ -403,6 +403,9 @@ fn run() -> Result<()> {
             for skipped in restored.skipped_candidates {
                 eprintln!("refuge: warning: skipped newer snapshot: {skipped}");
             }
+            for warning in restored.warnings {
+                eprintln!("refuge: warning: {warning}");
+            }
         }
         Commands::Hook {
             command: HookCommands::PostReceive,

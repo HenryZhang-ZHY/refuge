@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::discovery::{self, Snapshot, SnapshotHealth};
@@ -21,9 +22,11 @@ pub struct RestoredRepository {
     pub path: PathBuf,
     pub snapshot_id: String,
     pub skipped_candidates: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredRepository> {
+    let mut warnings = recover_replacements(&config.repos_dir)?;
     let catalog = discovery::list_snapshots(options.target, Some(options.selector))?;
     let (candidates, mut skipped_candidates) = candidates(catalog, options.snapshot_id)?;
     let first = candidates.first().context("no matching snapshot found")?;
@@ -32,6 +35,7 @@ pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredR
         .unwrap_or(&first.manifest.repo_name)
         .to_owned();
     let destination = repo::destination(config, &name)?;
+    let _name_lock = repo::lock_name(config, &name)?;
     if destination.exists() && !options.replace {
         bail!(
             "repository already exists at {}; pass --replace to replace it",
@@ -51,13 +55,19 @@ pub fn restore(config: &Config, options: RestoreOptions<'_>) -> Result<RestoredR
         }
         match prepare_snapshot(config, options.target, snapshot) {
             Ok(prepared) => {
+                let _identity_lock = repo::lock_identity(config, prepared.repo_id)?;
                 repo::ensure_identity_available(config, prepared.repo_id, &destination)?;
-                publish_repository(&prepared.repository, &destination, options.replace)?;
+                warnings.extend(publish_repository(
+                    &prepared.repository,
+                    &destination,
+                    options.replace,
+                )?);
                 return Ok(RestoredRepository {
                     name,
                     path: destination,
                     snapshot_id: prepared.snapshot_id,
                     skipped_candidates,
+                    warnings,
                 });
             }
             Err(CandidateFailure::Invalid(reason)) if !explicit => {
@@ -273,14 +283,83 @@ fn candidates(
     Ok((matching, diagnostics))
 }
 
-fn publish_repository(staged: &Path, destination: &Path, replace: bool) -> Result<()> {
+#[derive(Debug, Serialize, Deserialize)]
+struct RecoveryRecord {
+    destination_name: String,
+}
+
+fn recovery_root(repos_dir: &Path) -> PathBuf {
+    repos_dir.join(".refuge-recovery")
+}
+
+fn recover_replacements(repos_dir: &Path) -> Result<Vec<String>> {
+    let root = recovery_root(repos_dir);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut warnings = Vec::new();
+    for entry in fs::read_dir(&root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let operation = entry.path();
+        let record: RecoveryRecord =
+            serde_json::from_slice(&fs::read(operation.join("record.json")).with_context(
+                || format!("could not read recovery record in {}", operation.display()),
+            )?)
+            .with_context(|| format!("invalid recovery record in {}", operation.display()))?;
+        let destination_name = Path::new(&record.destination_name);
+        if destination_name.components().count() != 1
+            || destination_name.file_name().is_none()
+            || !record.destination_name.ends_with(".git")
+        {
+            bail!("unsafe repository replacement recovery record");
+        }
+        let destination = repos_dir.join(destination_name);
+        let previous = operation.join("previous.git");
+        if destination.exists() {
+            if previous.exists() {
+                warnings.push(format!(
+                    "completed cleanup of a previously committed replacement for {}",
+                    destination.display()
+                ));
+            }
+            fs::remove_dir_all(&operation).with_context(|| {
+                format!("could not clean recovery directory {}", operation.display())
+            })?;
+        } else if previous.exists() {
+            fs::rename(&previous, &destination).with_context(|| {
+                format!(
+                    "could not recover previous repository at {}",
+                    destination.display()
+                )
+            })?;
+            fs::remove_dir_all(&operation).with_context(|| {
+                format!("could not clean recovery directory {}", operation.display())
+            })?;
+            warnings.push(format!(
+                "recovered an interrupted replacement at {}",
+                destination.display()
+            ));
+        } else {
+            fs::remove_dir_all(&operation).with_context(|| {
+                format!("could not clean recovery directory {}", operation.display())
+            })?;
+        }
+    }
+    Ok(warnings)
+}
+
+fn publish_repository(staged: &Path, destination: &Path, replace: bool) -> Result<Vec<String>> {
     if !destination.exists() {
-        return fs::rename(staged, destination).with_context(|| {
+        fs::rename(staged, destination).with_context(|| {
             format!(
                 "could not publish restored repository {}",
                 destination.display()
             )
-        });
+        })?;
+        return Ok(Vec::new());
     }
     if !replace {
         bail!("repository already exists at {}", destination.display());
@@ -289,7 +368,19 @@ fn publish_repository(staged: &Path, destination: &Path, replace: bool) -> Resul
     let parent = destination
         .parent()
         .context("repository destination has no parent")?;
-    let replaced = parent.join(format!(".refuge-replaced-{}.git", uuid::Uuid::now_v7()));
+    let root = recovery_root(parent);
+    fs::create_dir_all(&root)?;
+    let operation = root.join(uuid::Uuid::now_v7().to_string());
+    fs::create_dir(&operation)?;
+    let destination_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("repository destination name is not valid UTF-8")?
+        .to_owned();
+    let mut record = serde_json::to_vec_pretty(&RecoveryRecord { destination_name })?;
+    record.push(b'\n');
+    storage::FsSnapshotStore.publish_bytes(&record, &operation.join("record.json"))?;
+    let replaced = operation.join("previous.git");
     fs::rename(destination, &replaced).with_context(|| {
         format!(
             "could not move existing repository {} aside",
@@ -299,22 +390,77 @@ fn publish_repository(staged: &Path, destination: &Path, replace: bool) -> Resul
     if let Err(error) = fs::rename(staged, destination) {
         let rollback = fs::rename(&replaced, destination);
         return match rollback {
-            Ok(()) => Err(error).with_context(|| {
-                format!(
-                    "could not publish restored repository {}",
-                    destination.display()
-                )
-            }),
+            Ok(()) => {
+                let _ = fs::remove_dir_all(&operation);
+                Err(error).with_context(|| {
+                    format!(
+                        "could not publish restored repository {}",
+                        destination.display()
+                    )
+                })
+            }
             Err(rollback_error) => bail!(
                 "could not publish restored repository and rollback failed: {error}; {rollback_error}"
             ),
         };
     }
-    fs::remove_dir_all(&replaced).with_context(|| {
-        format!(
-            "could not remove replaced repository {}",
-            replaced.display()
+    match fs::remove_dir_all(&operation) {
+        Ok(()) => Ok(Vec::new()),
+        Err(error) => Ok(vec![format!(
+            "repository replacement committed, but previous data remains at {}: {error}",
+            operation.display()
+        )]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recovery_operation(repos: &Path, name: &str) -> PathBuf {
+        let operation = recovery_root(repos).join(uuid::Uuid::now_v7().to_string());
+        fs::create_dir_all(&operation).unwrap();
+        fs::write(
+            operation.join("record.json"),
+            serde_json::to_vec(&RecoveryRecord {
+                destination_name: name.to_owned(),
+            })
+            .unwrap(),
         )
-    })?;
-    Ok(())
+        .unwrap();
+        operation
+    }
+
+    #[test]
+    fn recovers_the_previous_repository_after_an_interrupted_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let repos = temp.path().join("repos");
+        fs::create_dir(&repos).unwrap();
+        let operation = recovery_operation(&repos, "notes.git");
+        fs::create_dir(operation.join("previous.git")).unwrap();
+        fs::write(operation.join("previous.git/marker"), b"old").unwrap();
+
+        let warnings = recover_replacements(&repos).unwrap();
+
+        assert_eq!(fs::read(repos.join("notes.git/marker")).unwrap(), b"old");
+        assert!(!operation.exists());
+        assert!(warnings[0].contains("recovered"));
+    }
+
+    #[test]
+    fn cleans_previous_data_after_a_committed_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let repos = temp.path().join("repos");
+        fs::create_dir(&repos).unwrap();
+        let operation = recovery_operation(&repos, "notes.git");
+        fs::create_dir(operation.join("previous.git")).unwrap();
+        fs::create_dir(repos.join("notes.git")).unwrap();
+        fs::write(repos.join("notes.git/marker"), b"new").unwrap();
+
+        let warnings = recover_replacements(&repos).unwrap();
+
+        assert_eq!(fs::read(repos.join("notes.git/marker")).unwrap(), b"new");
+        assert!(!operation.exists());
+        assert!(warnings[0].contains("cleanup"));
+    }
 }
