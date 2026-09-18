@@ -41,6 +41,26 @@ fn git(current_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         .expect("run git")
 }
 
+fn create_repository(address: &str, name: &str) {
+    let body = format!(r#"{{"name":"{name}"}}"#);
+    let create = format!(
+        "POST /api/v1/repos HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-owner-key-0123456789\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    assert!(request(address, create.as_bytes()).starts_with("HTTP/1.1 201 Created"));
+}
+
+fn repository_json(address: &str, name: &str) -> String {
+    request(
+        address,
+        format!(
+            "GET /api/v1/repos/{name} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-owner-key-0123456789\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+}
+
 fn address(child: &mut std::process::Child) -> String {
     let stdout = child.stdout.take().expect("server stdout");
     let mut reader = BufReader::new(stdout);
@@ -210,5 +230,70 @@ fn standard_git_clients_clone_push_and_fetch_over_http() {
         std::fs::read_to_string(second.join("README.md")).unwrap(),
         "served by Refuge\n"
     );
+    stop(server);
+}
+
+#[test]
+fn server_push_is_accepted_while_backup_is_pending_and_retries_automatically() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let target = temp.path().join("backup");
+    let mut server = start_server(&data, Some(&target));
+    let address = address(&mut server);
+    create_repository(&address, "offline");
+
+    let remote = format!("http://refuge:test-owner-key-0123456789@{address}/git/offline.git");
+    let work = temp.path().join("work");
+    assert!(
+        git(temp.path(), &["clone", &remote, work.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(
+        git(&work, &["config", "user.name", "Refuge Test"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&work, &["config", "user.email", "refuge@example.invalid"])
+            .status
+            .success()
+    );
+    std::fs::write(work.join("pending.txt"), "must survive\n").unwrap();
+    assert!(git(&work, &["add", "pending.txt"]).status.success());
+    assert!(
+        git(&work, &["commit", "-m", "pending backup"])
+            .status
+            .success()
+    );
+
+    let staging = target.join(".refuge-staging");
+    let saved_staging = target.join(".refuge-staging.saved");
+    std::fs::rename(&staging, &saved_staging).unwrap();
+    std::fs::write(&staging, "temporarily unavailable").unwrap();
+
+    let push = git(&work, &["push", "origin", "main"]);
+    assert!(
+        push.status.success(),
+        "push must not depend on backup availability: {}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+    let pending = repository_json(&address, "offline");
+    assert!(pending.contains("\"protection\":\"pending\""), "{pending}");
+
+    std::fs::remove_file(&staging).unwrap();
+    std::fs::rename(&saved_staging, &staging).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = repository_json(&address, "offline");
+        if status.contains("\"protection\":\"protected\"") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "backup was not retried: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     stop(server);
 }

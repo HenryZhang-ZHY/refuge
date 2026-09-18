@@ -103,6 +103,8 @@ async fn serve_async(options: ServeOptions) -> Result<()> {
         config_path: layout.root.join("config.toml"),
         secret,
     };
+    crate::backup_queue::reconcile(&state.config, &layout.root)?;
+    spawn_backup_worker(state.config.clone(), layout.root.clone());
 
     println!("serving refuge on http://{address}");
     std::io::stdout().flush()?;
@@ -342,6 +344,10 @@ async fn git_http(
         .env("REMOTE_USER", "refuge")
         .env("REMOTE_ADDR", "unknown")
         .env("REFUGE_CONFIG", &state.config_path)
+        .env(
+            "REFUGE_SERVER_DATA",
+            state.config_path.parent().unwrap_or(Path::new(".")),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -548,4 +554,23 @@ impl IntoResponse for ApiError {
         )
             .into_response()
     }
+}
+
+fn spawn_backup_worker(config: Config, data_root: PathBuf) {
+    tokio::spawn(async move {
+        loop {
+            let config = config.clone();
+            let data_root = data_root.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::backup_queue::process_once(&config, &data_root)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("refuge: backup worker failed: {error:#}"),
+                Err(error) => eprintln!("refuge: backup worker stopped unexpectedly: {error}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
 }

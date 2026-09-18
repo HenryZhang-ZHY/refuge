@@ -1,5 +1,6 @@
 pub mod application;
 pub mod backup;
+pub mod backup_queue;
 pub mod config;
 pub mod discovery;
 pub mod git;

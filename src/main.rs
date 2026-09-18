@@ -435,10 +435,16 @@ fn run() -> Result<()> {
         } => {
             let result = refuge::config::Config::load().and_then(|config| {
                 let path = std::env::current_dir()?;
-                refuge::backup::backup_path(&config, &path)
+                if let Some(data_root) = std::env::var_os("REFUGE_SERVER_DATA") {
+                    refuge::backup_queue::enqueue(&config, &path, &PathBuf::from(data_root))?;
+                    Ok(None)
+                } else {
+                    refuge::backup::backup_path(&config, &path).map(Some)
+                }
             });
             match result {
-                Ok(outcome) => print_backup_outcome(&outcome),
+                Ok(Some(outcome)) => print_backup_outcome(&outcome),
+                Ok(None) => println!("backup queued"),
                 Err(error) => eprintln!("refuge: backup failed: {error:#}"),
             }
         }
