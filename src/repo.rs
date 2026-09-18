@@ -112,12 +112,17 @@ pub fn configure(path: &Path, id: Uuid) -> Result<()> {
 }
 
 pub fn install_hook(repo: &Path) -> Result<()> {
-    let executable = std::env::current_exe().context("could not locate the refuge executable")?;
-    let executable = executable
-        .to_str()
-        .context("refuge executable path is not valid UTF-8")?;
-    let quoted = format!("'{}'", executable.replace('\'', "'\"'\"'"));
-    let hook = format!("#!/bin/sh\nexec {quoted} hook post-receive\n");
+    // Resolve `refuge` through PATH at hook-execution time rather than
+    // baking in the absolute path of whichever binary ran this command.
+    // This mirrors how pre-commit/prek install their git hooks, and avoids
+    // silently breaking backups if the refuge executable is later moved,
+    // rebuilt, or upgraded in place. If `refuge` isn't on PATH when the
+    // hook runs, fail loudly instead of a silent no-op.
+    let hook = "#!/bin/sh\n\
+        command -v refuge >/dev/null 2>&1 && exec refuge hook post-receive\n\
+        echo \"refuge: 'refuge' not found on PATH; this push was NOT backed up.\" >&2\n\
+        echo \"Add refuge's install directory to PATH, or run 'refuge backup' manually.\" >&2\n\
+        exit 1\n";
     let hook_path = repo.join("hooks").join("post-receive");
     std::fs::write(&hook_path, hook)
         .with_context(|| format!("could not write hook {}", hook_path.display()))?;

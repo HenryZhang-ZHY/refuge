@@ -184,6 +184,20 @@ impl RefugeWorld {
     }
 }
 
+/// PATH value with the built `refuge` binary's directory prepended, so the
+/// post-receive hook's `command -v refuge` can find it during tests, the
+/// same way it would find a real installation on the user's PATH.
+fn path_with_refuge() -> std::ffi::OsString {
+    let refuge_dir = assert_cmd::cargo::cargo_bin("refuge")
+        .parent()
+        .expect("refuge binary has a parent directory")
+        .to_owned();
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![refuge_dir];
+    paths.extend(std::env::split_paths(&existing));
+    std::env::join_paths(paths).expect("join PATH entries")
+}
+
 fn git_output(repo: &Path, args: &[&str], config: Option<&Path>) -> Output {
     let mut command = ProcessCommand::new("git");
     // Newer git defaults to `safe.bareRepository = explicit`, which refuses
@@ -193,7 +207,8 @@ fn git_output(repo: &Path, args: &[&str], config: Option<&Path>) -> Output {
         .args(["-c", "safe.bareRepository=all"])
         .arg("-C")
         .arg(repo)
-        .args(args);
+        .args(args)
+        .env("PATH", path_with_refuge());
     if let Some(config) = config {
         command.env("REFUGE_CONFIG", config);
     }
