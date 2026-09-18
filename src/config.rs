@@ -1,4 +1,5 @@
 use std::env;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -27,7 +28,13 @@ impl Config {
     pub fn load_from(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("could not read config {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))
+        let config: Self =
+            toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
+        if !config.repos_dir.is_absolute() || !config.target_root.is_absolute() {
+            bail!("configuration paths must be absolute");
+        }
+        validate_paths(&config.repos_dir, &config.target_root)?;
+        Ok(config)
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
@@ -36,8 +43,19 @@ impl Config {
                 .with_context(|| format!("could not create {}", parent.display()))?;
         }
         let text = toml::to_string_pretty(self).context("could not serialize config")?;
-        std::fs::write(path, text)
-            .with_context(|| format!("could not write config {}", path.display()))
+        let parent = path.parent().context("config path has no parent")?;
+        let mut partial = tempfile::Builder::new()
+            .prefix(".refuge-config-")
+            .tempfile_in(parent)
+            .with_context(|| format!("could not stage config in {}", parent.display()))?;
+        partial.write_all(text.as_bytes())?;
+        partial.as_file().sync_all()?;
+        partial.persist_noclobber(path).map_err(|error| {
+            anyhow::anyhow!(error.error)
+                .context(format!("could not create config {}", path.display()))
+        })?;
+        sync_parent(parent)?;
+        Ok(())
     }
 }
 
@@ -77,15 +95,26 @@ pub fn default_repos_dir() -> Result<PathBuf> {
 
 pub fn initialize(repos: Option<PathBuf>, target: Option<PathBuf>) -> Result<(Config, PathBuf)> {
     let config_path = default_path()?;
+    let parent = config_path
+        .parent()
+        .context("config path has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("could not create {}", parent.display()))?;
+    let lock_path = parent.join(".refuge-init.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    fs2::FileExt::lock_exclusive(&lock).context("could not lock Refuge initialization")?;
     if config_path.exists() {
         bail!(
             "Refuge is already initialized at {}; existing configuration was not changed. Remove that file only when intentionally creating a new Refuge instance.",
             config_path.display()
         );
     }
-    let base = config_path
-        .parent()
-        .context("config path has no parent directory")?;
+    let base = parent;
     let repos = match repos {
         Some(repos) => absolute(repos)?,
         None => absolute(default_repos_dir()?)?,
@@ -139,4 +168,69 @@ fn validate_paths(repos: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> Result<()> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_config_creation_never_overwrites_instance_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let configs: Vec<_> = [Uuid::now_v7(), Uuid::now_v7()]
+            .into_iter()
+            .map(|instance_id| Config {
+                repos_dir: temp.path().join(format!("repos-{instance_id}")),
+                target_root: temp.path().join(format!("target-{instance_id}")),
+                instance_id,
+            })
+            .collect();
+        let handles: Vec<_> = configs
+            .clone()
+            .into_iter()
+            .map(|config| {
+                let path = path.clone();
+                std::thread::spawn(move || config.save_to(&path))
+            })
+            .collect();
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(Result::is_ok)
+            .count();
+
+        assert_eq!(successes, 1);
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(configs.contains(&loaded));
+    }
+
+    #[test]
+    fn loading_revalidates_path_separation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let config = Config {
+            repos_dir: temp.path().join("data"),
+            target_root: temp.path().join("data/target"),
+            instance_id: Uuid::nil(),
+        };
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        assert!(
+            Config::load_from(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("inside")
+        );
+    }
 }
