@@ -51,12 +51,13 @@ fn read_manifest(target: &Path, repo_id: &str) -> Manifest {
         .join("refuge/v1/repos")
         .join(repo_id)
         .join("snapshots");
-    let path = std::fs::read_dir(&snapshots)
+    std::fs::read_dir(&snapshots)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| path.to_string_lossy().ends_with(".manifest.json"))
-        .expect("a manifest was published");
-    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        .filter(|path| path.to_string_lossy().ends_with(".manifest.json"))
+        .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+        .max_by_key(|manifest: &Manifest| manifest.generation)
+        .expect("a manifest was published")
 }
 
 fn repo_id_of(repos: &Path, name: &str) -> String {
@@ -84,7 +85,7 @@ fn backup_without_lfs_objects_omits_the_lfs_artifact() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["backup", "plain"])
+        .args(["repo", "backup", "plain"])
         .assert()
         .success();
 
@@ -111,14 +112,16 @@ fn backup_and_restore_round_trip_lfs_objects() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["backup", "vault"])
+        .args(["repo", "backup", "vault"])
         .assert()
         .success()
         .stdout(contains("LFS bytes"));
 
     let repo_id = repo_id_of(&repos, "vault");
     let manifest = read_manifest(&target, &repo_id);
-    let lfs_artifact = manifest.lfs_artifact.expect("an LFS artifact was published");
+    let lfs_artifact = manifest
+        .lfs_artifact
+        .expect("an LFS artifact was published");
     assert_eq!(lfs_artifact.format, "lfs-archive");
     let archive_path = target
         .join("refuge/v1/repos")
@@ -175,7 +178,7 @@ fn backup_rejects_a_corrupt_lfs_object() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["backup", "vault"])
+        .args(["repo", "backup", "vault"])
         .assert()
         .failure()
         .stderr(contains("is corrupt"));
@@ -196,13 +199,15 @@ fn restore_rejects_a_tampered_lfs_archive() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["backup", "vault"])
+        .args(["repo", "backup", "vault"])
         .assert()
         .success();
 
     let repo_id = repo_id_of(&repos, "vault");
     let manifest = read_manifest(&target, &repo_id);
-    let lfs_artifact = manifest.lfs_artifact.expect("an LFS artifact was published");
+    let lfs_artifact = manifest
+        .lfs_artifact
+        .expect("an LFS artifact was published");
     let archive_path = target
         .join("refuge/v1/repos")
         .join(&repo_id)

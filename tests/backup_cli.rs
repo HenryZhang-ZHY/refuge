@@ -108,11 +108,11 @@ fn push_publishes_verified_bundle_then_manifest() {
     git(&work, &["push", "refuge", "main"], Some(&config));
 
     let paths = manifests(&target, &repo_id);
-    assert_eq!(paths.len(), 1);
-    let manifest: Manifest = serde_json::from_slice(&std::fs::read(&paths[0]).unwrap()).unwrap();
+    assert_eq!(paths.len(), 2);
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(&paths[1]).unwrap()).unwrap();
     assert_eq!(manifest.schema_version, 1);
     assert_eq!(manifest.repo_name, "ledger");
-    assert_eq!(manifest.generation, 1);
+    assert_eq!(manifest.generation, 2);
     assert!(manifest.refs.contains_key("refs/heads/main"));
     let artifact = manifest.artifact.expect("bundle artifact");
     let bundle = target
@@ -124,13 +124,13 @@ fn push_publishes_verified_bundle_then_manifest() {
 
     let mut first = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("refuge"))
         .env("REFUGE_CONFIG", &config)
-        .args(["backup", "ledger"])
+        .args(["repo", "backup", "ledger"])
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
     let mut second = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("refuge"))
         .env("REFUGE_CONFIG", &config)
-        .args(["backup", "ledger"])
+        .args(["repo", "backup", "ledger"])
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
@@ -144,11 +144,11 @@ fn push_publishes_verified_bundle_then_manifest() {
                 .generation
         })
         .collect();
-    assert_eq!(generations, [1, 2, 3]);
+    assert_eq!(generations, [1, 2, 3, 4]);
 }
 
 #[test]
-fn empty_repository_backup_publishes_manifest_without_artifact() {
+fn repository_creation_publishes_empty_manifest_without_artifact() {
     let temp = tempfile::tempdir().unwrap();
     let (config, repos, target) = initialized(&temp);
     Command::cargo_bin("refuge")
@@ -163,17 +163,10 @@ fn empty_repository_backup_publishes_manifest_without_artifact() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["status", "empty"])
+        .args(["repo", "status", "empty"])
         .assert()
         .success()
-        .stdout(contains("Unprotected"));
-
-    Command::cargo_bin("refuge")
-        .unwrap()
-        .env("REFUGE_CONFIG", &config)
-        .args(["backup", "empty"])
-        .assert()
-        .success();
+        .stdout(contains("Protected"));
 
     let path = manifests(&target, &repo_id).pop().unwrap();
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -184,7 +177,7 @@ fn empty_repository_backup_publishes_manifest_without_artifact() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["status", "empty"])
+        .args(["repo", "status", "empty"])
         .assert()
         .success()
         .stdout(contains("Protected"));
@@ -200,7 +193,7 @@ fn empty_repository_backup_publishes_manifest_without_artifact() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["status", "empty"])
+        .args(["repo", "status", "empty"])
         .assert()
         .success()
         .stdout(contains("Pending"));

@@ -216,7 +216,7 @@ pub fn install_hook(repo: &Path) -> Result<()> {
     let hook = "#!/bin/sh\n\
         command -v refuge >/dev/null 2>&1 && exec refuge hook post-receive\n\
         echo \"refuge: 'refuge' not found on PATH; this push was NOT backed up.\" >&2\n\
-        echo \"Add refuge's install directory to PATH, or run 'refuge backup' manually.\" >&2\n\
+        echo \"Add refuge's install directory to PATH, or run 'refuge repo backup' manually.\" >&2\n\
         exit 1\n";
     let hook_path = repo.join("hooks").join("post-receive");
     std::fs::write(&hook_path, hook)

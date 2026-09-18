@@ -10,7 +10,7 @@ const ROOT_HELP: &str = "Typical workflow:
   2. refuge repo create <NAME>
   3. Run the printed `git remote add refuge ...` command in your working copy
   4. git push refuge main
-  5. refuge status <NAME>
+  5. refuge repo status --all
 
 Refuge verifies snapshots written to the target directory. Cloud upload is not verified;
 your sync client remains responsible for uploading that directory.";
@@ -46,36 +46,13 @@ enum Commands {
         #[arg(long, value_name = "SYNC_DIR")]
         target: PathBuf,
     },
-    /// Create or import hosted repositories.
+    /// Manage hosted repositories.
     #[command(
-        after_help = "Examples:\n  refuge repo create notes\n  refuge repo import notes <EXISTING_REPO>"
+        after_help = "Examples:\n  refuge repo create notes\n  refuge repo import notes --connect\n  refuge repo status --all"
     )]
     Repo {
         #[command(subcommand)]
         command: RepoCommands,
-    },
-    /// Create and publish a verified repository snapshot.
-    #[command(
-        after_help = "Examples:\n  refuge backup notes\n  refuge backup --repo-path <BARE_REPO>"
-    )]
-    Backup {
-        /// Hosted repository name.
-        #[arg(
-            value_name = "NAME",
-            required_unless_present = "repo_path",
-            conflicts_with = "repo_path"
-        )]
-        name: Option<String>,
-        /// Explicit bare repository path (used by the post-receive hook).
-        #[arg(long, value_name = "BARE_REPO")]
-        repo_path: Option<PathBuf>,
-    },
-    /// Show whether hosted repositories match their newest snapshots.
-    #[command(after_help = "Examples:\n  refuge status\n  refuge status notes")]
-    Status {
-        /// Repository name. Omit it to show every hosted repository.
-        #[arg(value_name = "NAME")]
-        name: Option<String>,
     },
     /// Inspect published snapshots.
     Snapshots {
@@ -123,13 +100,16 @@ enum RepoCommands {
         clone: Option<Option<PathBuf>>,
     },
     /// Import an existing repository with mirror semantics.
-    #[command(after_help = "Example:\n  refuge repo import notes <EXISTING_REPO>")]
+    #[command(
+        after_help = "Examples:\n  refuge repo import notes\n  refuge repo import notes <EXISTING_REPO> --connect"
+    )]
     Import {
         /// Name to give the hosted repository.
         #[arg(value_name = "NAME")]
         name: String,
-        /// Existing Git working tree or bare repository to mirror.
-        #[arg(value_name = "EXISTING_REPO")]
+        /// Existing Git working tree or bare repository to mirror. Defaults to
+        /// the current directory.
+        #[arg(value_name = "EXISTING_REPO", default_value = ".")]
         path: PathBuf,
         /// Add the hosted repository as a remote in the imported working tree.
         #[arg(long)]
@@ -177,6 +157,27 @@ enum RepoCommands {
         /// Repository name, stable UUID, or `.` for the current working copy.
         #[arg(value_name = "NAME_OR_REPO_ID", default_value = ".")]
         selector: String,
+    },
+    /// Create and publish a verified snapshot of a hosted repository.
+    #[command(after_help = "Examples:\n  refuge repo backup\n  refuge repo backup notes")]
+    Backup {
+        /// Repository name, stable UUID, or `.`. Defaults to the current
+        /// working copy.
+        #[arg(value_name = "NAME_OR_REPO_ID", default_value = ".")]
+        selector: String,
+    },
+    /// Show whether hosted repositories match their newest snapshots.
+    #[command(
+        after_help = "Examples:\n  refuge repo status\n  refuge repo status notes\n  refuge repo status --all"
+    )]
+    Status {
+        /// Repository name, stable UUID, or `.`. Defaults to the current
+        /// working copy.
+        #[arg(value_name = "NAME_OR_REPO_ID", conflicts_with = "all")]
+        selector: Option<String>,
+        /// Show every hosted repository.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -231,6 +232,8 @@ fn run() -> Result<()> {
                         repository.id,
                         repository.path.display()
                     );
+                    let manifest = refuge::backup::backup_path(&config, &repository.path)?;
+                    print_protected(&manifest);
                     if let Some(directory) = clone {
                         let directory = directory.unwrap_or_else(|| PathBuf::from(&name));
                         refuge::git::clone_working(&repository.path, &directory, "origin", &[])?;
@@ -249,6 +252,8 @@ fn run() -> Result<()> {
                         repository.id,
                         repository.path.display()
                     );
+                    let manifest = refuge::backup::backup_path(&config, &repository.path)?;
+                    print_protected(&manifest);
                     if connect {
                         let remote = remote.unwrap_or_else(|| "refuge".to_owned());
                         let (hosted, _) =
@@ -257,8 +262,6 @@ fn run() -> Result<()> {
                             "connected remote `{remote}` to {} ({})",
                             hosted.name, hosted.id
                         );
-                        let manifest = refuge::backup::backup_path(&config, &repository.path)?;
-                        print_protected(&manifest);
                     }
                 }
                 RepoCommands::List => {
@@ -319,25 +322,22 @@ fn run() -> Result<()> {
                     println!("Default branch: {head}");
                     println!("Status: {}", protection_description(state));
                 }
-            }
-        }
-        Commands::Backup { name, repo_path } => {
-            let config = refuge::config::Config::load()?;
-            let manifest = match (name, repo_path) {
-                (Some(selector), None) => {
+                RepoCommands::Backup { selector } => {
                     let repository = refuge::repo::resolve(&config, &selector)?;
-                    refuge::backup::backup_path(&config, &repository.path)?
+                    let manifest = refuge::backup::backup_path(&config, &repository.path)?;
+                    print_protected(&manifest);
                 }
-                (None, Some(path)) => refuge::backup::backup_path(&config, &path)?,
-                _ => unreachable!("clap validates backup arguments"),
-            };
-            print_protected(&manifest);
-        }
-        Commands::Status { name } => {
-            let config = refuge::config::Config::load()?;
-            for (repository, state) in refuge::discovery::statuses(&config, name.as_deref())? {
-                let description = protection_description(state);
-                println!("{}: {description}", repository.name);
+                RepoCommands::Status { selector, all } => {
+                    let selector = if all {
+                        None
+                    } else {
+                        Some(selector.as_deref().unwrap_or("."))
+                    };
+                    for (repository, state) in refuge::discovery::statuses(&config, selector)? {
+                        let description = protection_description(state);
+                        println!("{}: {description}", repository.name);
+                    }
+                }
             }
         }
         Commands::Snapshots {
@@ -428,7 +428,9 @@ fn protection_description(state: refuge::discovery::ProtectionState) -> String {
         refuge::discovery::ProtectionState::Protected { snapshot_id } => {
             format!("Protected locally ({snapshot_id})\n  Cloud upload is not verified by Refuge")
         }
-        refuge::discovery::ProtectionState::Pending => "Pending (run `refuge backup`)".to_owned(),
+        refuge::discovery::ProtectionState::Pending => {
+            "Pending (run `refuge repo backup`)".to_owned()
+        }
         refuge::discovery::ProtectionState::Unprotected => "Unprotected".to_owned(),
         refuge::discovery::ProtectionState::Corrupt { reason } => {
             format!("Unprotected (corrupt: {reason})")

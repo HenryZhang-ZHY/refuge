@@ -308,8 +308,8 @@ fn push_succeeds(world: &mut RefugeWorld) {
 #[then("a verified bundle and manifest appear in the OneDrive sync folder")]
 fn verified_snapshot_appears(world: &mut RefugeWorld) {
     let manifests = world.manifests();
-    assert_eq!(manifests.len(), 1);
-    let artifact = manifests[0].artifact.as_ref().expect("bundle artifact");
+    assert_eq!(manifests.len(), 2);
+    let artifact = manifests[1].artifact.as_ref().expect("bundle artifact");
     let bundle = world
         .target
         .join("refuge/v1/repos")
@@ -323,7 +323,7 @@ fn verified_snapshot_appears(world: &mut RefugeWorld) {
 fn status_is_honest(world: &mut RefugeWorld) {
     let status = world
         .command()
-        .args(["status", "notes"])
+        .args(["repo", "status", "notes"])
         .assert()
         .success()
         .get_output()
@@ -334,11 +334,11 @@ fn status_is_honest(world: &mut RefugeWorld) {
     assert!(status.contains("Cloud upload is not verified"));
 }
 
-#[given(expr = "the {string} repository has one protected snapshot")]
+#[given(expr = "the {string} repository has an initial snapshot and one pushed snapshot")]
 fn repository_has_snapshot(world: &mut RefugeWorld, name: String) {
     assert_eq!(name, "notes");
     world.first_push();
-    assert_eq!(world.manifests().len(), 1);
+    assert_eq!(world.manifests().len(), 2);
 }
 
 #[when("the user commits and pushes another change")]
@@ -347,20 +347,20 @@ fn push_another_change(world: &mut RefugeWorld) {
     world.assert_push_succeeded();
 }
 
-#[then("Refuge publishes generation 2 automatically")]
-fn publishes_generation_two(world: &mut RefugeWorld) {
-    assert_eq!(world.manifests().last().unwrap().generation, 2);
+#[then("Refuge publishes generation 3 automatically")]
+fn publishes_generation_three(world: &mut RefugeWorld) {
+    assert_eq!(world.manifests().last().unwrap().generation, 3);
 }
 
-#[then("generation 1 remains available")]
-fn generation_one_remains(world: &mut RefugeWorld) {
+#[then("earlier generations remain available")]
+fn earlier_generations_remain(world: &mut RefugeWorld) {
     assert_eq!(
         world
             .manifests()
             .iter()
             .map(|manifest| manifest.generation)
             .collect::<Vec<_>>(),
-        [1, 2]
+        [1, 2, 3]
     );
 }
 

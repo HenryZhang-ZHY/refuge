@@ -49,10 +49,10 @@ refuge repo import <name> <path-to-existing-repo>
     Prints:  git remote add refuge "<repos_dir>\<name>.git"
 
 refuge hook post-receive          (cwd = bare repo, set by git)
-    = refuge backup --repo-path . ; never exits non-zero in a way that hides push success
+    invokes the internal backup path; never exits non-zero in a way that hides push success
     (post-receive cannot fail the push anyway; it prints "refuge: backup failed: ..." if so)
 
-refuge backup <name> | --repo-path <p>
+refuge repo backup [<name|repoid|.>]
     1. ref_state = for-each-ref + symbolic-ref HEAD ; hash
     2. if no refs -> write manifest with artifact=null, done
     3. git bundle create <staging>\<snapshot-id>.bundle --all
@@ -62,9 +62,9 @@ refuge backup <name> | --repo-path <p>
     7. write <id>.manifest.json  (LAST)
     8. print "protected <short-id> <n> refs <size>"
 
-refuge status [<name>]
-    For each repo: current ref-state hash vs newest manifest in target
-    -> Protected | Pending (hash differs; run `refuge backup`) | Unprotected (no manifest)
+refuge repo status [<name|repoid|.>] | --all
+    For each selected repo: current ref-state hash vs newest manifest in target
+    -> Protected | Pending (hash differs; run `refuge repo backup`) | Unprotected (no manifest)
 
 refuge snapshots list [--target <root>] [<name|repoid>]
     Reads envelopes only. Marks `corrupt` if artifact missing or size mismatch.
@@ -123,7 +123,7 @@ Step 7 is the day's acceptance test and is PRD §21.4 minus the "new machine" pa
 are enough to start pushing real repositories; 6 and 7 can land the same evening.
 
 Deliberately skipped in iteration 0: retries (a failed backup prints an error; the next push or a
-manual `refuge backup` retries), disk-space check, audit log, `snapshots test`, `doctor`,
+manual `refuge repo backup` retries), disk-space check, audit log, `snapshots test`, `doctor`,
 OneDrive account detection (the user picks the folder), server mode, encryption, daemon,
 Linux support (builds, untested).
 

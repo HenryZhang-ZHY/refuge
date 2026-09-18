@@ -52,7 +52,8 @@ refuge repo import notes D:\path\to\existing\repo
 ```
 
 Either command prints a `git remote add refuge ...` command — run it inside
-your working copy.
+your working copy. Creation and import immediately publish an initial verified
+snapshot, so the repository is protected before its first subsequent push.
 
 For a new repository, Refuge can also create a working copy immediately:
 
@@ -62,11 +63,12 @@ refuge repo create notes --clone
 refuge repo create notes --clone D:\work\notes
 ```
 
-When importing an existing working tree, `--connect` adds a `refuge` remote
-to that tree and immediately publishes its initial snapshot:
+The import source defaults to the current directory. `--connect` additionally
+adds a `refuge` remote to that working tree:
 
 ```powershell
-refuge repo import notes D:\work\notes --connect
+cd D:\work\notes
+refuge repo import notes --connect
 ```
 
 ### 3. Push to back it up
@@ -83,8 +85,8 @@ step is needed for normal use.
 ### 4. Check status
 
 ```powershell
-refuge status            # all hosted repositories
-refuge status notes      # a single repository
+refuge repo status --all  # all hosted repositories
+refuge repo status notes  # a single repository
 ```
 
 ### 5. Inspect snapshots
@@ -126,8 +128,8 @@ Inside a connected working copy, `.` selects the associated hosted repository:
 
 ```powershell
 refuge repo view
-refuge status .
-refuge backup .
+refuge repo status
+refuge repo backup
 ```
 
 ### 7. Restore
@@ -145,7 +147,7 @@ refuge restore notes --snapshot <SNAPSHOT_ID> --as recovered-notes
 Useful if you skipped the hook or want to force a fresh snapshot:
 
 ```powershell
-refuge backup notes
+refuge repo backup notes
 ```
 
 ## Git LFS support
@@ -154,8 +156,8 @@ Refuge automatically backs up Git LFS content too. If a hosted bare repo has
 LFS objects under `lfs/objects` (e.g. because contributors pushed with
 `git-lfs` installed), every backup/restore also snapshots and restores that
 directory as a separate archive alongside the git bundle — no extra
-configuration needed. `refuge status`/`refuge backup` output shows the LFS
-byte count when present.
+configuration needed. `refuge repo status`/`refuge repo backup` output shows
+the LFS byte count when present.
 
 ## Notes
 

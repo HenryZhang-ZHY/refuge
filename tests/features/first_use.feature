@@ -27,10 +27,10 @@ Feature: First use with a local Git remote and a OneDrive sync folder
 
   @S04
   Scenario: A later push publishes a new generation without deleting the old one
-    Given the "notes" repository has one protected snapshot
+    Given the "notes" repository has an initial snapshot and one pushed snapshot
     When the user commits and pushes another change
-    Then Refuge publishes generation 2 automatically
-    And generation 1 remains available
+    Then Refuge publishes generation 3 automatically
+    And earlier generations remain available
     And the newest manifest covers the repository's current refs
 
   @S05

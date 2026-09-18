@@ -162,8 +162,11 @@ fn repo_list_and_clone_make_hosted_repositories_available_as_working_copies() {
         hosted.display().to_string()
     );
     assert_eq!(
-        std::fs::read_to_string(clone.join("entry.txt")).unwrap(),
-        "one\n"
+        std::fs::read_to_string(clone.join("entry.txt"))
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["one"]
     );
 }
 
@@ -229,14 +232,14 @@ fn connect_and_dot_selector_operate_on_the_current_working_copy() {
         .unwrap()
         .env("REFUGE_CONFIG", &config)
         .current_dir(&work)
-        .args(["backup", "."])
+        .args(["repo", "backup"])
         .assert()
         .success();
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
         .current_dir(&work)
-        .args(["status", "."])
+        .args(["repo", "status"])
         .assert()
         .success()
         .stdout(contains("notes: Protected locally"));
@@ -332,7 +335,62 @@ fn import_can_connect_the_source_and_publish_its_initial_snapshot() {
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
-        .args(["status", "notes"])
+        .args(["repo", "status", "notes"])
+        .assert()
+        .success()
+        .stdout(contains("notes: Protected locally"));
+}
+
+#[test]
+fn repo_status_all_lists_every_hosted_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, _) = initialized(&temp);
+    for name in ["notes", "ledger"] {
+        Command::cargo_bin("refuge")
+            .unwrap()
+            .env("REFUGE_CONFIG", &config)
+            .args(["repo", "create", name])
+            .assert()
+            .success();
+    }
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "status", "--all"])
+        .assert()
+        .success()
+        .stdout(contains("ledger: Protected locally"))
+        .stdout(contains("notes: Protected locally"));
+}
+
+#[test]
+fn import_defaults_to_current_directory_and_publishes_initial_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    git_output(&source, &["init", "--initial-branch=main"]);
+    git_output(&source, &["config", "user.name", "Refuge Test"]);
+    git_output(&source, &["config", "user.email", "refuge@example.invalid"]);
+    std::fs::write(source.join("entry.txt"), "one\n").unwrap();
+    git_output(&source, &["add", "entry.txt"]);
+    git_output(&source, &["commit", "-m", "initial"]);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .current_dir(&source)
+        .args(["repo", "import", "notes"])
+        .assert()
+        .success()
+        .stdout(contains("protected"));
+
+    assert!(repos.join("notes.git").is_dir());
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "status", "notes"])
         .assert()
         .success()
         .stdout(contains("notes: Protected locally"));

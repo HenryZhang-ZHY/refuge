@@ -11,10 +11,8 @@ fn no_arguments_prints_quick_start_and_returns_usage_error() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("Typical workflow"))
-        .stderr(predicate::str::contains(
-            "refuge init --target <SYNC_DIR>",
-        ))
-        .stderr(predicate::str::contains("refuge status <NAME>"));
+        .stderr(predicate::str::contains("refuge init --target <SYNC_DIR>"))
+        .stderr(predicate::str::contains("refuge repo status --all"));
 }
 
 #[test]
@@ -79,7 +77,7 @@ fn init_requires_the_user_to_choose_a_backup_target() {
 #[test]
 fn mistyped_command_suggests_the_valid_command() {
     refuge()
-        .arg("stats")
+        .args(["repo", "stats"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("unrecognized subcommand 'stats'"))
@@ -89,15 +87,25 @@ fn mistyped_command_suggests_the_valid_command() {
 }
 
 #[test]
-fn conflicting_backup_arguments_explain_the_conflict() {
+fn repository_commands_are_grouped_under_repo() {
     refuge()
-        .args(["backup", "notes", "--repo-path", "."])
+        .arg("backup")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains(
-            "the argument '[NAME]' cannot be used with '--repo-path <BARE_REPO>'",
-        ))
-        .stderr(predicate::str::contains("Usage: refuge backup"));
+        .stderr(predicate::str::contains("unrecognized subcommand 'backup'"));
+
+    refuge()
+        .arg("status")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unrecognized subcommand 'status'"));
+
+    refuge()
+        .args(["repo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("backup"))
+        .stdout(predicate::str::contains("status"));
 }
 
 #[test]
@@ -105,7 +113,7 @@ fn missing_configuration_names_refuge_and_points_to_init() {
     let temp = tempfile::tempdir().unwrap();
     refuge()
         .env("REFUGE_CONFIG", temp.path().join("missing.toml"))
-        .arg("status")
+        .args(["repo", "status", "--all"])
         .assert()
         .code(2)
         .stderr(predicate::str::starts_with("refuge: "))

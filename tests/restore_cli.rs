@@ -113,19 +113,19 @@ fn restored_repository_preserves_identity_and_can_back_up_again() {
     );
     run_git(&work, &["push", "--mirror", "refuge"], Some(&config));
     let expected = git::ref_state(&hosted).unwrap();
-    assert_eq!(manifest_count(&target, &repo_id), 1);
+    assert_eq!(manifest_count(&target, &repo_id), 2);
 
     let snapshots = target
         .join("refuge/v1/repos")
         .join(&repo_id)
         .join("snapshots");
-    let manifest_path = std::fs::read_dir(&snapshots)
+    let manifest: Manifest = std::fs::read_dir(&snapshots)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| path.to_string_lossy().ends_with(".manifest.json"))
+        .filter(|path| path.to_string_lossy().ends_with(".manifest.json"))
+        .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+        .max_by_key(|manifest: &Manifest| manifest.generation)
         .unwrap();
-    let manifest: Manifest =
-        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
     let bundle = target
         .join("refuge/v1/repos")
         .join(&repo_id)
@@ -171,5 +171,5 @@ fn restored_repository_preserves_identity_and_can_back_up_again() {
     run_git(&work, &["add", "note.md"], None);
     run_git(&work, &["commit", "-m", "second"], None);
     run_git(&work, &["push", "refuge", "main"], Some(&config));
-    assert_eq!(manifest_count(&target, &repo_id), 2);
+    assert_eq!(manifest_count(&target, &repo_id), 3);
 }

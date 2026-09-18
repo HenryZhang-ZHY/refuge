@@ -200,7 +200,11 @@ fn tracks_pattern_with_lfs(world: &mut LfsWorld, pattern: String) {
     git_stdout(&work, &["lfs", "install", "--local"], None);
     git_stdout(&work, &["lfs", "track", &pattern], None);
     git_stdout(&work, &["add", ".gitattributes"], None);
-    git_stdout(&work, &["commit", "-m", "track large files with Git LFS"], None);
+    git_stdout(
+        &work,
+        &["commit", "-m", "track large files with Git LFS"],
+        None,
+    );
 }
 
 #[when("the user commits a large binary file and pushes the main branch")]
@@ -242,7 +246,7 @@ fn push_output_reports_lfs_bytes(world: &mut LfsWorld) {
 fn status_says_protected_locally(world: &mut LfsWorld) {
     let status = world
         .command()
-        .args(["status", "vault"])
+        .args(["repo", "status", "vault"])
         .assert()
         .success()
         .get_output()
@@ -305,11 +309,7 @@ fn restored_lfs_objects_match(world: &mut LfsWorld) {
     let clean_config = world.clean_config.as_ref().expect("clean config");
     git_stdout(
         world.temp.path(),
-        &[
-            "clone",
-            restored.to_str().unwrap(),
-            clone.to_str().unwrap(),
-        ],
+        &["clone", restored.to_str().unwrap(), clone.to_str().unwrap()],
         None,
     );
     git_stdout(&clone, &["lfs", "pull"], Some(clean_config));

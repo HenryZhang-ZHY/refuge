@@ -140,8 +140,8 @@ Exit: `cargo test` green on both OSes; a bundle round-trips a fixture repo with 
 - `refuge daemon run`: reconcile loop + single worker: lock, snapshot ref state, bundle, verify,
   list-heads equality check, sha256, put artifact, re-stat and compare size, put manifest,
   mark job `Protected`.
-- `refuge status [repo]`: derived `ProtectionState`, last protected snapshot, pending job.
-- `refuge backup now <repo>` enqueues immediately.
+- `refuge repo status [repo]`: derived `ProtectionState`, last protected snapshot, pending job.
+- `refuge repo backup <repo>` enqueues immediately.
 
 Exit: PRD §21.1 steps 1 to 9 pass against a plain directory target (OneDrive confirmation is
 phase 4). Also: push during an in-flight bundle produces a second snapshot, and status is never
