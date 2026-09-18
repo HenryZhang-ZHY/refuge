@@ -8,7 +8,7 @@ services:
     environment:
       REFUGE_SECRET_FILE: /run/secrets/refuge-secret
     volumes:
-      - refuge-runtime:/var/lib/refuge
+      - refuge-runtime-v1:/var/lib/refuge
       - ./refuge-backup:/var/backups/refuge
     secrets:
       - refuge-secret
@@ -18,4 +18,4 @@ secrets:
     file: ./refuge-secret.txt
 
 volumes:
-  refuge-runtime:
+  refuge-runtime-v1:
