@@ -92,8 +92,8 @@ fn extract_lfs_archive(archive: &Path, repo: &Path) -> Result<()> {
     let destination = repo.join("lfs").join("objects");
     fs::create_dir_all(&destination)
         .with_context(|| format!("could not create {}", destination.display()))?;
-    let file = fs::File::open(archive)
-        .with_context(|| format!("could not open {}", archive.display()))?;
+    let file =
+        fs::File::open(archive).with_context(|| format!("could not open {}", archive.display()))?;
     tar::Archive::new(file)
         .unpack(&destination)
         .with_context(|| format!("could not extract {}", archive.display()))?;

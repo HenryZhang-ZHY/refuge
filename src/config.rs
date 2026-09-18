@@ -67,11 +67,9 @@ pub fn default_repos_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     let base = env::var_os("LOCALAPPDATA").map(PathBuf::from);
     #[cfg(not(windows))]
-    let base = env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
-        });
+    let base = env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
+        env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
+    });
 
     base.map(|path| path.join("refuge").join("repos"))
         .context("could not determine the user data directory")
