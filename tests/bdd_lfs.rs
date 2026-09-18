@@ -29,6 +29,7 @@ struct LfsWorld {
     clean_config: Option<PathBuf>,
     clean_repos: Option<PathBuf>,
     restored: Option<PathBuf>,
+    backup_output: Option<Output>,
 }
 
 impl LfsWorld {
@@ -53,6 +54,7 @@ impl LfsWorld {
             clean_config: None,
             clean_repos: None,
             restored: None,
+            backup_output: None,
         }
     }
 
@@ -160,6 +162,15 @@ fn path_with_refuge() -> std::ffi::OsString {
 }
 
 fn git_output(repo: &Path, args: &[&str], config: Option<&Path>) -> Output {
+    git_output_with_env(repo, args, config, &[])
+}
+
+fn git_output_with_env(
+    repo: &Path,
+    args: &[&str],
+    config: Option<&Path>,
+    environment: &[(&str, &str)],
+) -> Output {
     let mut command = ProcessCommand::new("git");
     // Newer git defaults to `safe.bareRepository = explicit`, which refuses
     // to auto-detect a bare repository via `-C`. These steps intentionally
@@ -173,6 +184,7 @@ fn git_output(repo: &Path, args: &[&str], config: Option<&Path>) -> Output {
     if let Some(config) = config {
         command.env("REFUGE_CONFIG", config);
     }
+    command.envs(environment.iter().copied());
     command.output().expect("run git")
 }
 
@@ -222,6 +234,75 @@ fn commit_large_binary_and_push(world: &mut LfsWorld) {
         &["push", "refuge", "main"],
         Some(&world.config),
     ));
+}
+
+#[when("the user pushes a large binary pointer without uploading its LFS object")]
+fn push_pointer_without_lfs_object(world: &mut LfsWorld) {
+    let work = world.work().to_path_buf();
+    let content: Vec<u8> = (0..2_000_000).map(|index| (index % 251) as u8).collect();
+    std::fs::write(work.join("asset.bin"), &content).expect("write binary asset");
+    world.binary_content = content;
+    git_stdout(&work, &["add", "asset.bin"], None);
+    git_stdout(&work, &["commit", "-m", "add unavailable LFS asset"], None);
+    world.push_output = Some(git_output_with_env(
+        &work,
+        &["push", "refuge", "main"],
+        Some(&world.config),
+        &[("GIT_LFS_SKIP_PUSH", "1")],
+    ));
+}
+
+#[then("the Git push succeeds but Refuge reports incomplete LFS protection")]
+fn push_reports_incomplete_lfs_protection(world: &mut LfsWorld) {
+    let output = world.push_output.as_ref().expect("push output");
+    assert!(
+        output.status.success(),
+        "push failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("backup failed"), "push stderr: {stderr}");
+    assert!(
+        stderr.contains("required LFS object"),
+        "push stderr: {stderr}"
+    );
+    assert!(stderr.contains("is missing"), "push stderr: {stderr}");
+}
+
+#[then("status says the repository has pending unprotected changes")]
+fn status_says_pending(world: &mut LfsWorld) {
+    world
+        .command()
+        .args(["repo", "status", "vault"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Pending"));
+}
+
+#[when("the user uploads the missing LFS object and retries backup")]
+fn upload_missing_object_and_retry(world: &mut LfsWorld) {
+    let work = world.work().to_path_buf();
+    git_stdout(&work, &["lfs", "push", "--all", "refuge"], None);
+    world.backup_output = Some(
+        world
+            .command()
+            .args(["repo", "backup", "vault"])
+            .output()
+            .expect("retry backup"),
+    );
+}
+
+#[then("the retry protects the Git history and LFS content")]
+fn retry_protects_git_and_lfs(world: &mut LfsWorld) {
+    let output = world.backup_output.as_ref().expect("backup output");
+    assert!(
+        output.status.success(),
+        "backup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("LFS bytes"));
+    verified_lfs_archive_appears(world);
+    status_says_protected_locally(world);
 }
 
 #[then("the push succeeds without a separate backup command")]

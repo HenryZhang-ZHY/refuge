@@ -30,6 +30,9 @@ struct RefugeWorld {
     clean_config: Option<PathBuf>,
     clean_repos: Option<PathBuf>,
     restored: Option<PathBuf>,
+    restore_output: Option<Output>,
+    corrupted_snapshot_id: Option<String>,
+    expected_snapshot_id: Option<String>,
 }
 
 impl RefugeWorld {
@@ -55,6 +58,9 @@ impl RefugeWorld {
             clean_config: None,
             clean_repos: None,
             restored: None,
+            restore_output: None,
+            corrupted_snapshot_id: None,
+            expected_snapshot_id: None,
         }
     }
 
@@ -401,11 +407,17 @@ fn clean_installation_uses_target(world: &mut RefugeWorld) {
 #[when(expr = "the user restores the {string} repository")]
 fn restore_repository(world: &mut RefugeWorld, name: String) {
     let config = world.clean_config.as_ref().expect("clean config");
-    world
+    let output = world
         .command_for(config)
         .args(["restore", &name])
-        .assert()
-        .success();
+        .output()
+        .expect("run restore");
+    assert!(
+        output.status.success(),
+        "restore failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    world.restore_output = Some(output);
     world.restored = Some(
         world
             .clean_repos
@@ -413,6 +425,104 @@ fn restore_repository(world: &mut RefugeWorld, name: String) {
             .expect("clean repository directory")
             .join(format!("{name}.git")),
     );
+}
+
+#[given("the \"notes\" repository has a corrupted newest snapshot and a valid older snapshot")]
+fn repository_has_corrupted_newest_snapshot(world: &mut RefugeWorld) {
+    world.first_push();
+    world.expected_state = Some(git::ref_state(world.hosted()).unwrap());
+    world.expected_snapshot_id = Some(
+        world
+            .manifests()
+            .last()
+            .expect("valid older snapshot")
+            .snapshot_id
+            .clone(),
+    );
+    world.commit_and_push("first note\nsecond note\n", "add second note");
+    world.assert_push_succeeded();
+    let newest = world.manifests().last().expect("newest snapshot").clone();
+    let artifact = newest.artifact.as_ref().expect("newest bundle");
+    let bundle = world
+        .target
+        .join("refuge/v1/repos")
+        .join(world.repo_id())
+        .join(&artifact.key);
+    let mut bytes = std::fs::read(&bundle).expect("newest bundle bytes");
+    bytes[0] ^= 0xff;
+    std::fs::write(&bundle, bytes).expect("corrupt newest bundle without changing size");
+    world.corrupted_snapshot_id = Some(newest.snapshot_id);
+    std::fs::remove_dir_all(world.hosted()).expect("remove original repository");
+}
+
+#[then("Refuge reports the skipped snapshot and actual restored snapshot")]
+fn reports_restore_fallback(world: &mut RefugeWorld) {
+    let output = world.restore_output.as_ref().expect("restore output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains(world.expected_snapshot_id.as_deref().unwrap()),
+        "restore stdout: {stdout}"
+    );
+    assert!(stderr.contains("skipped newer snapshot"));
+    assert!(stderr.contains(world.corrupted_snapshot_id.as_deref().unwrap()));
+    assert!(stderr.contains("checksum or size differs"));
+}
+
+#[when("the user explicitly restores the corrupted snapshot")]
+fn explicitly_restore_corrupted_snapshot(world: &mut RefugeWorld) {
+    let config = world.clean_config.as_ref().expect("clean config");
+    let snapshot = world
+        .corrupted_snapshot_id
+        .as_deref()
+        .expect("corrupted snapshot id");
+    let output = world
+        .command_for(config)
+        .args([
+            "restore",
+            "notes",
+            "--snapshot",
+            snapshot,
+            "--as",
+            "rejected",
+        ])
+        .output()
+        .expect("run explicit restore");
+    world.restore_output = Some(output);
+}
+
+#[then("restore fails without creating a repository")]
+fn explicit_restore_fails_without_repository(world: &mut RefugeWorld) {
+    let output = world.restore_output.as_ref().expect("restore output");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("selected snapshot is corrupt"));
+    assert!(
+        !world
+            .clean_repos
+            .as_ref()
+            .expect("clean repositories")
+            .join("rejected.git")
+            .exists()
+    );
+}
+
+#[when(expr = "the user restores {string} as {string}")]
+fn restore_under_another_name(world: &mut RefugeWorld, name: String, as_name: String) {
+    let output = world
+        .command()
+        .args(["restore", &name, "--as", &as_name])
+        .output()
+        .expect("run renamed restore");
+    world.restore_output = Some(output);
+    world.restored = Some(world.repos.join(format!("{as_name}.git")));
+}
+
+#[then("Refuge rejects the duplicate active repository identity")]
+fn rejects_duplicate_identity(world: &mut RefugeWorld) {
+    let output = world.restore_output.as_ref().expect("restore output");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already active"));
+    assert!(!world.restored.as_ref().unwrap().exists());
 }
 
 #[then("the repository identity and refs match the published snapshot")]

@@ -14,3 +14,13 @@ Feature: Git LFS objects survive backup and restore
     And a verified LFS archive appears in the OneDrive sync folder
     When a clean Refuge installation restores the "vault" repository
     Then the restored repository's Git LFS objects match the original content
+
+  @LFS02
+  Scenario: Missing LFS content blocks protection until the object is supplied
+    Given the "vault" working copy uses the Refuge repository as a remote
+    And the working copy tracks "*.bin" files with Git LFS
+    When the user pushes a large binary pointer without uploading its LFS object
+    Then the Git push succeeds but Refuge reports incomplete LFS protection
+    And status says the repository has pending unprotected changes
+    When the user uploads the missing LFS object and retries backup
+    Then the retry protects the Git history and LFS content

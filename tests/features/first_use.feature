@@ -40,3 +40,25 @@ Feature: First use with a local Git remote and a OneDrive sync folder
     When the user restores the "notes" repository
     Then the repository identity and refs match the published snapshot
     And the restored repository can be cloned as a normal Git remote
+
+  @S06
+  Scenario: Default restore falls back from a corrupted newest snapshot
+    Given the "notes" repository has a corrupted newest snapshot and a valid older snapshot
+    And a clean Refuge installation points at the existing OneDrive target
+    When the user restores the "notes" repository
+    Then the repository identity and refs match the published snapshot
+    And Refuge reports the skipped snapshot and actual restored snapshot
+
+  @S07
+  Scenario: Explicit restore never substitutes for a corrupted snapshot
+    Given the "notes" repository has a corrupted newest snapshot and a valid older snapshot
+    And a clean Refuge installation points at the existing OneDrive target
+    When the user explicitly restores the corrupted snapshot
+    Then restore fails without creating a repository
+
+  @S08
+  Scenario: Restoring under another name cannot duplicate an active identity
+    Given the "notes" working copy uses the Refuge repository as a remote
+    When the user commits a change and pushes the main branch
+    And the user restores "notes" as "notes-copy"
+    Then Refuge rejects the duplicate active repository identity
