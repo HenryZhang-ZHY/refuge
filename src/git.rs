@@ -128,6 +128,30 @@ pub fn clone_mirror(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn init_bare(destination: &Path) -> Result<()> {
+    let destination = destination
+        .to_str()
+        .context("repository destination is not valid UTF-8")?;
+    run(
+        None,
+        &["init", "--bare", "--initial-branch=main", destination],
+    )?;
+    Ok(())
+}
+
+pub fn config_set(repo: &Path, key: &str, value: &str) -> Result<()> {
+    run(Some(repo), &["config", key, value])?;
+    Ok(())
+}
+
+pub fn config_get(repo: &Path, key: &str) -> Result<String> {
+    let output = run(Some(repo), &["config", "--get", key])?;
+    Ok(String::from_utf8(output.stdout)
+        .context("git returned non-UTF-8 config data")?
+        .trim()
+        .to_owned())
+}
+
 pub fn set_symbolic_head(repo: &Path, target: &str) -> Result<()> {
     run(Some(repo), &["symbolic-ref", "HEAD", target])?;
     Ok(())
