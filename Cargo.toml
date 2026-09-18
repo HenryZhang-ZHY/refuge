@@ -28,3 +28,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 [[test]]
 name = "bdd_first_use"
 harness = false
+
+[[test]]
+name = "bdd_lfs"
+harness = false

@@ -816,7 +816,7 @@ Metrics should be collected for:
 - Time from successful push to protected state.
 - Restore duration.
 
-Incremental bundles, content deduplication, partial clone, Git LFS hosting, and large-repository optimization are future considerations rather than MVP requirements.
+Incremental bundles, content deduplication, partial clone, and large-repository optimization are future considerations rather than MVP requirements. Git LFS content (a repository's `lfs/objects` directory) is backed up and restored alongside the git bundle, since a snapshot that silently drops large-file content would violate the product's recovery guarantee for any repository that happens to use LFS.
 
 ## 19. Backup state model
 
@@ -999,7 +999,6 @@ Potential later capabilities include:
 - Read-only mirror exports.
 - Administrative web UI.
 - Notifications through operating-system, email, or webhook channels.
-- Git LFS backup and hosting.
 - Multi-user authentication without adding broader collaboration features.
 
 None of these should delay the core MVP: standard Git push and pull, immediate verified backup, transparent status, and clean-machine recovery.
