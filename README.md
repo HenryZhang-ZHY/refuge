@@ -34,11 +34,14 @@ It exposes standard Git Smart HTTP and Git LFS endpoints; client machines need
 only `git` and, for LFS repositories, `git-lfs`. There is no Refuge-specific Git
 transport.
 
-Create a fixed owner key and start the included Compose stack:
+Create the self-contained store and its fixed owner key, then start the included
+Compose stack:
 
 ```sh
-openssl rand -hex 32 > refuge-secret.txt
-chmod 600 refuge-secret.txt
+install -d -m 700 refuge-store/secrets
+openssl rand -hex 32 > refuge-store/secrets/owner-secret
+chmod 600 refuge-store/secrets/owner-secret
+chown -R 10001:10001 refuge-store
 docker compose up --build -d
 ```
 
@@ -54,11 +57,28 @@ key as the password. A Git credential helper can store it normally. The key is
 also used by the Web UI to obtain an HttpOnly session cookie and is not stored
 in browser local storage.
 
-The image persists live repositories and its durable backup queue in
-`/var/lib/refuge`; verified immutable snapshots go to `/backup`. The supplied
-Compose file uses named volumes for both. Replace the `/backup` volume with a
-bind-mounted NAS or backup filesystem when desired, ensuring UID 10001 can
-write it.
+The image has exactly one persistence boundary: `/var/lib/refuge`. The supplied
+Compose file bind-mounts `./refuge-store` there. That store contains its identity,
+owner key, live repositories, durable backup queue, and verified immutable
+snapshots under `backups/`. Moving or restoring the directory and mounting it at
+the same container path restores the complete server. UID 10001 must be able to
+read and write the store.
+
+The store layout is:
+
+```text
+refuge-store/
+├── store.toml
+├── repos/
+├── queue/
+├── backups/
+└── secrets/
+    └── owner-secret
+```
+
+The server intentionally ignores `REFUGE_SECRET` and `REFUGE_SECRET_FILE`; its
+credential belongs to the store. Protect and encrypt copies of the entire store
+because they contain both repository data and the owner credential.
 
 The default port mapping is loopback-only. Put Caddy, Tailscale Serve, or
 another TLS terminator in front before exposing the service to other machines.

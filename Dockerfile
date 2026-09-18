@@ -19,15 +19,13 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --create-home --home-dir /var/lib/refuge refuge \
-    && mkdir -p /backup \
-    && chown refuge:refuge /backup
+    && useradd --system --uid 10001 --create-home --home-dir /var/lib/refuge refuge
 
 COPY --from=rust-builder /build/refuge/target/release/refuge /usr/local/bin/refuge
 
-VOLUME ["/var/lib/refuge", "/backup"]
+VOLUME ["/var/lib/refuge"]
 EXPOSE 7788
 USER refuge
 
 ENTRYPOINT ["refuge"]
-CMD ["serve", "/var/lib/refuge", "--target", "/backup", "--listen", "0.0.0.0:7788"]
+CMD ["serve", "/var/lib/refuge", "--listen", "0.0.0.0:7788"]
