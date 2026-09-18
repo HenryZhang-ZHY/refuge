@@ -85,10 +85,19 @@ pub fn connect(
     remote_name: &str,
     replace: bool,
 ) -> Result<(HostedRepository, PathBuf)> {
-    let repository = resolve(config, selector)?;
     let cwd = std::env::current_dir().context("could not read current directory")?;
-    let worktree =
-        git::top_level(&cwd).context("current directory is not in a Git working tree")?;
+    connect_at(config, selector, remote_name, replace, &cwd)
+}
+
+pub fn connect_at(
+    config: &Config,
+    selector: &str,
+    remote_name: &str,
+    replace: bool,
+    path: &Path,
+) -> Result<(HostedRepository, PathBuf)> {
+    let repository = resolve(config, selector)?;
+    let worktree = git::top_level(path).context("source is not a Git working tree")?;
     let key = format!("remote.{remote_name}.url");
     match git::config_get_optional(&worktree, &key)? {
         None => git::remote_add(&worktree, remote_name, &repository.path)?,

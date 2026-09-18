@@ -266,3 +266,65 @@ fn connect_refuses_to_replace_an_existing_remote_without_the_flag() {
         .assert()
         .success();
 }
+
+#[test]
+fn create_can_clone_the_new_hosted_repository_immediately() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .current_dir(temp.path())
+        .args(["repo", "create", "scratch", "--clone"])
+        .assert()
+        .success()
+        .stdout(contains("cloned scratch"));
+
+    let work = temp.path().join("scratch");
+    assert_eq!(
+        git_output(&work, &["remote", "get-url", "origin"]),
+        repos.join("scratch.git").display().to_string()
+    );
+}
+
+#[test]
+fn import_can_connect_the_source_and_publish_its_initial_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    git_output(&source, &["init", "--initial-branch=main"]);
+    git_output(&source, &["config", "user.name", "Refuge Test"]);
+    git_output(&source, &["config", "user.email", "refuge@example.invalid"]);
+    std::fs::write(source.join("entry.txt"), "one\n").unwrap();
+    git_output(&source, &["add", "entry.txt"]);
+    git_output(&source, &["commit", "-m", "initial"]);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args([
+            "repo",
+            "import",
+            "notes",
+            source.to_str().unwrap(),
+            "--connect",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("connected remote `refuge`"))
+        .stdout(contains("protected"));
+
+    assert_eq!(
+        git_output(&source, &["remote", "get-url", "refuge"]),
+        repos.join("notes.git").display().to_string()
+    );
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["status", "notes"])
+        .assert()
+        .success()
+        .stdout(contains("notes: Protected locally"));
+}
