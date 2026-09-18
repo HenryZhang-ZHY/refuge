@@ -1,3 +1,4 @@
+pub mod application;
 pub mod backup;
 pub mod config;
 pub mod discovery;

@@ -233,14 +233,14 @@ fn run() -> Result<()> {
             let config = refuge::config::Config::load()?;
             match command {
                 RepoCommands::Create { name, clone } => {
-                    let repository = refuge::repo::create(&config, &name)?;
+                    let provisioned = refuge::application::create_repository(&config, &name)?;
+                    let repository = provisioned.repository;
                     println!(
                         "created repository {}\ngit remote add refuge \"{}\"",
                         repository.id,
                         repository.path.display()
                     );
-                    let outcome = refuge::backup::backup_path(&config, &repository.path)?;
-                    print_backup_outcome(&outcome);
+                    print_backup_outcome(&provisioned.backup);
                     if let Some(directory) = clone {
                         let directory = directory.unwrap_or_else(|| PathBuf::from(&name));
                         refuge::git::clone_working(&repository.path, &directory, "origin", &[])?;
@@ -253,14 +253,15 @@ fn run() -> Result<()> {
                     connect,
                     remote,
                 } => {
-                    let repository = refuge::repo::import(&config, &name, &path)?;
+                    let provisioned =
+                        refuge::application::import_repository(&config, &name, &path)?;
+                    let repository = provisioned.repository;
                     println!(
                         "created repository {}\ngit remote add refuge \"{}\"",
                         repository.id,
                         repository.path.display()
                     );
-                    let outcome = refuge::backup::backup_path(&config, &repository.path)?;
-                    print_backup_outcome(&outcome);
+                    print_backup_outcome(&provisioned.backup);
                     if connect {
                         let remote = remote.unwrap_or_else(|| "refuge".to_owned());
                         let (hosted, _) =

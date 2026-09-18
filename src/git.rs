@@ -41,18 +41,36 @@ fn output_error(args: &[&str], output: &Output) -> anyhow::Error {
     )
 }
 
-fn run(repo: Option<&Path>, args: &[&str]) -> Result<Output> {
+fn command(repo: Option<&Path>) -> Command {
     let mut command = Command::new("git");
+    // Git hooks export repository-location variables for the repository that
+    // invoked the hook. Refuge frequently targets a different repository via
+    // `-C`, so inheriting those variables can silently redirect the command.
+    // Authentication helpers, HOME, and ordinary Git configuration remain
+    // inherited intentionally.
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+    ] {
+        command.env_remove(key);
+    }
     if let Some(repo) = repo {
-        // Newer git defaults to `safe.bareRepository = explicit`, which
-        // refuses to auto-detect a bare repository via `-C` (this module is
-        // also exercised against ordinary, non-bare working trees, so `-C`
-        // must keep working for both). Opt back into auto-detection.
         command
             .args(["-c", "safe.bareRepository=all"])
             .arg("-C")
             .arg(repo);
     }
+    command
+}
+
+fn run(repo: Option<&Path>, args: &[&str]) -> Result<Output> {
+    let mut command = command(repo);
     let output = command
         .args(args)
         .output()
@@ -77,10 +95,7 @@ pub fn ref_state(repo: &Path) -> Result<RefState> {
         refs.insert(name.to_owned(), oid.to_owned());
     }
 
-    let output = Command::new("git")
-        .args(["-c", "safe.bareRepository=all"])
-        .arg("-C")
-        .arg(repo)
+    let output = command(Some(repo))
         .args(["symbolic-ref", "--quiet", "HEAD"])
         .output()
         .context("could not read symbolic HEAD")?;
@@ -143,8 +158,7 @@ pub fn clone_working(
     remote_name: &str,
     extra_args: &[OsString],
 ) -> Result<()> {
-    let mut command = Command::new("git");
-    let output = command
+    let output = command(None)
         .arg("clone")
         .args(extra_args)
         .args(["--origin", remote_name])
@@ -187,10 +201,7 @@ pub fn config_get(repo: &Path, key: &str) -> Result<String> {
 }
 
 pub fn config_get_optional(repo: &Path, key: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args(["-c", "safe.bareRepository=all"])
-        .arg("-C")
-        .arg(repo)
+    let output = command(Some(repo))
         .args(["config", "--get", key])
         .output()
         .with_context(|| format!("could not read git config {key}"))?;
