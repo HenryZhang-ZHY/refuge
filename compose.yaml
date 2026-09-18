@@ -1,0 +1,22 @@
+services:
+  refuge:
+    build: .
+    image: refuge:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7788:7788"
+    environment:
+      REFUGE_SECRET_FILE: /run/secrets/refuge-secret
+    volumes:
+      - refuge-data:/var/lib/refuge
+      - refuge-backup:/backup
+    secrets:
+      - refuge-secret
+
+volumes:
+  refuge-data:
+  refuge-backup:
+
+secrets:
+  refuge-secret:
+    file: ./refuge-secret.txt
