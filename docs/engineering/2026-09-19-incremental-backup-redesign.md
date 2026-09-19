@@ -1,6 +1,6 @@
 ---
 title: Refuge Incremental Backup Redesign
-status: Proposed
+status: Superseded by 2026-09-19-v2-snapshot-store-implementation-plan.md
 date: 2026-09-19
 outline: |
   - L1 Re-evaluate the assumption that live bare repositories must not be synchronized through OneDrive

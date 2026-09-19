@@ -82,8 +82,7 @@ Docker volume: /var/lib/refuge/
 └── queue/
 
 Portable bind mount: /var/backups/refuge/
-├── .refuge-staging/
-└── refuge/v1/repos/…
+└── refuge/v2/repos/…
 ```
 
 The owner key remains a deployment secret rather than repository data. Preserve
@@ -151,9 +150,11 @@ git remote add refuge "D:\git\refuge-repos\notes.git"
 git push refuge main
 ```
 
-Every push runs a post-receive hook that automatically publishes a verified
-snapshot (bundle + manifest) to your `--target` directory. No separate backup
-step is needed for normal use.
+Every push runs a post-receive hook that publishes a verified recovery point to
+your `--target` directory. The first non-empty recovery point is a full Git
+bundle checkpoint; later pushes normally add only an incremental bundle. The
+manifest is written last and is the publication marker. No separate backup step
+is needed for normal use.
 
 ### 4. Check status
 
@@ -167,6 +168,8 @@ refuge repo status notes  # a single repository
 ```powershell
 refuge snapshots list
 refuge snapshots list notes
+refuge snapshots verify notes
+refuge snapshots usage notes
 ```
 
 ### 6. Create another working copy
@@ -217,20 +220,23 @@ refuge restore notes --snapshot <SNAPSHOT_ID> --as recovered-notes
 
 ## Manual backup
 
-Useful if you skipped the hook or want to force a fresh snapshot:
+Useful if you skipped the hook. It is idempotent when the current refs are
+already protected. Use `--checkpoint` to deliberately publish a new full
+checkpoint:
 
 ```powershell
 refuge repo backup notes
+refuge repo backup notes --checkpoint
 ```
 
 ## Git LFS support
 
-Refuge automatically backs up Git LFS content too. If a hosted bare repo has
-LFS objects under `lfs/objects` (e.g. because contributors pushed with
-`git-lfs` installed), every backup/restore also snapshots and restores that
-directory as a separate archive alongside the git bundle — no extra
-configuration needed. `refuge repo status`/`refuge repo backup` output shows
-the LFS byte count when present.
+Refuge automatically backs up Git LFS content too. Reachable LFS pointers are
+scanned in batches, and each required object is stored once under its SHA-256
+OID. A small content-addressed set file records the exact objects required by a
+recovery point. Git-only pushes therefore write zero new LFS object bytes.
+Restore hashes every copied object and independently derives the expected set
+from the restored Git history. No extra configuration is needed.
 
 ## Notes
 

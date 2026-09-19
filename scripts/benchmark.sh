@@ -4,6 +4,7 @@ set -euo pipefail
 binary=${1:-target/release/refuge}
 repo_count=${REFUGE_BENCH_REPOS:-5}
 snapshot_count=${REFUGE_BENCH_SNAPSHOTS:-20}
+lfs_bytes=${REFUGE_BENCH_LFS_BYTES:-1048576}
 bench_root=$(mktemp -d)
 trap 'rm -rf "$bench_root"' EXIT
 
@@ -25,6 +26,14 @@ for ((repo_index = 1; repo_index <= repo_count; repo_index++)); do
     work="$bench_root/work-$repo_index"
     git init --initial-branch=main "$work" >/dev/null
     git -C "$work" remote add refuge "$bench_root/repos/$name.git"
+    if [[ $repo_index -eq 1 ]]; then
+        head -c "$lfs_bytes" /dev/zero > "$bench_root/lfs-object"
+        oid=$(sha256sum "$bench_root/lfs-object" | cut -d' ' -f1)
+        printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %s\n' "$oid" "$lfs_bytes" > "$work/attachment.bin"
+        object="$bench_root/repos/$name.git/lfs/objects/${oid:0:2}/${oid:2:2}/$oid"
+        mkdir -p "$(dirname "$object")"
+        cp "$bench_root/lfs-object" "$object"
+    fi
     for ((snapshot = 1; snapshot < snapshot_count; snapshot++)); do
         printf '%s %s\n' "$repo_index" "$snapshot" >> "$work/history.txt"
         git -C "$work" add history.txt
@@ -52,5 +61,12 @@ printf 'operation,nanoseconds,git_processes\n'
 measure status_all "$binary" repo status --all
 measure snapshot_list "$binary" snapshots list
 measure backup_one "$binary" repo backup repo-1
+measure verify_one "$binary" snapshots verify repo-1
+mv "$bench_root/repos/repo-1.git" "$bench_root/repo-1.saved"
+measure restore_one "$binary" restore repo-1
 printf 'fixture_repositories,%s\nfixture_snapshots_per_repository,%s\n' \
     "$repo_count" "$snapshot_count"
+printf 'fixture_lfs_bytes,%s\n' "$lfs_bytes"
+printf 'target_bytes,%s\n' "$(du -sb "$bench_root/target" | cut -f1)"
+printf 'target_files,%s\n' "$(find "$bench_root/target" -type f | wc -l)"
+"$binary" snapshots usage
