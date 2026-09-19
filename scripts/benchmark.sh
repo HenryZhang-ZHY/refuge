@@ -36,7 +36,7 @@ for ((repo_index = 1; repo_index <= repo_count; repo_index++)); do
     fi
     for ((snapshot = 1; snapshot < snapshot_count; snapshot++)); do
         printf '%s %s\n' "$repo_index" "$snapshot" >> "$work/history.txt"
-        git -C "$work" add history.txt
+        git -C "$work" add .
         git -C "$work" commit -m "snapshot $snapshot" >/dev/null
         git -C "$work" push refuge main >/dev/null 2>&1
     done
