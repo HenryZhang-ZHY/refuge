@@ -171,13 +171,13 @@ impl RefugeWorld {
     fn manifests(&self) -> Vec<Manifest> {
         let directory = self
             .target
-            .join("refuge/v1/repos")
+            .join("refuge/v2/repos")
             .join(self.repo_id())
             .join("snapshots");
         let mut paths: Vec<_> = std::fs::read_dir(directory)
             .expect("snapshot directory")
             .map(|entry| entry.expect("snapshot entry").path())
-            .filter(|path| path.to_string_lossy().ends_with(".manifest.json"))
+            .filter(|path| path.to_string_lossy().ends_with(".json"))
             .collect();
         paths.sort();
         paths
@@ -315,10 +315,10 @@ fn push_succeeds(world: &mut RefugeWorld) {
 fn verified_snapshot_appears(world: &mut RefugeWorld) {
     let manifests = world.manifests();
     assert_eq!(manifests.len(), 2);
-    let artifact = manifests[1].artifact.as_ref().expect("bundle artifact");
+    let artifact = manifests[1].git.bundle.as_ref().expect("bundle artifact");
     let bundle = world
         .target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(world.repo_id())
         .join(&artifact.key);
     assert_eq!(std::fs::metadata(&bundle).unwrap().len(), artifact.size);
@@ -442,10 +442,10 @@ fn repository_has_corrupted_newest_snapshot(world: &mut RefugeWorld) {
     world.commit_and_push("first note\nsecond note\n", "add second note");
     world.assert_push_succeeded();
     let newest = world.manifests().last().expect("newest snapshot").clone();
-    let artifact = newest.artifact.as_ref().expect("newest bundle");
+    let artifact = newest.git.bundle.as_ref().expect("newest bundle");
     let bundle = world
         .target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(world.repo_id())
         .join(&artifact.key);
     let mut bytes = std::fs::read(&bundle).expect("newest bundle bytes");
@@ -466,7 +466,7 @@ fn reports_restore_fallback(world: &mut RefugeWorld) {
     );
     assert!(stderr.contains("skipped newer snapshot"));
     assert!(stderr.contains(world.corrupted_snapshot_id.as_deref().unwrap()));
-    assert!(stderr.contains("checksum or size differs"));
+    assert!(stderr.contains("checksum differs from manifest"));
 }
 
 #[when("the user explicitly restores the corrupted snapshot")]

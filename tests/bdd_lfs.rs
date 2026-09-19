@@ -128,13 +128,13 @@ impl LfsWorld {
     fn manifests(&self) -> Vec<Manifest> {
         let directory = self
             .target
-            .join("refuge/v1/repos")
+            .join("refuge/v2/repos")
             .join(self.repo_id())
             .join("snapshots");
         let mut paths: Vec<_> = std::fs::read_dir(directory)
             .expect("snapshot directory")
             .map(|entry| entry.expect("snapshot entry").path())
-            .filter(|path| path.to_string_lossy().ends_with(".manifest.json"))
+            .filter(|path| path.to_string_lossy().ends_with(".json"))
             .collect();
         paths.sort();
         paths
@@ -342,15 +342,17 @@ fn verified_lfs_archive_appears(world: &mut LfsWorld) {
     let manifests = world.manifests();
     let manifest = manifests.last().expect("at least one snapshot");
     let artifact = manifest
-        .lfs_artifact
+        .lfs
         .as_ref()
-        .expect("manifest records an LFS artifact");
-    let archive = world
+        .expect("manifest records LFS content")
+        .set
+        .clone();
+    let set = world
         .target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(world.repo_id())
         .join(&artifact.key);
-    let bytes = std::fs::read(&archive).expect("published LFS archive readable");
+    let bytes = std::fs::read(&set).expect("published LFS set readable");
     assert_eq!(bytes.len() as u64, artifact.size);
     let mut digest = Sha256::new();
     digest.update(&bytes);

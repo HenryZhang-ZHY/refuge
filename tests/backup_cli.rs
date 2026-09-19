@@ -12,13 +12,13 @@ use support::TestEnvironment;
 /// same way it would find a real installation on the user's PATH.
 fn manifests(target: &Path, repo_id: &str) -> Vec<PathBuf> {
     let directory = target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(repo_id)
         .join("snapshots");
     let mut paths: Vec<_> = std::fs::read_dir(directory)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.to_string_lossy().ends_with(".manifest.json"))
+        .filter(|path| path.to_string_lossy().ends_with(".json"))
         .collect();
     paths.sort();
     paths
@@ -51,14 +51,14 @@ fn push_publishes_verified_bundle_then_manifest() {
     let paths = manifests(&env.target, &repo_id);
     assert_eq!(paths.len(), 2);
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(&paths[1]).unwrap()).unwrap();
-    assert_eq!(manifest.schema_version, 1);
+    assert_eq!(manifest.schema_version, 2);
     assert_eq!(manifest.repo_name, "ledger");
     assert_eq!(manifest.generation, 2);
     assert!(manifest.refs.contains_key("refs/heads/main"));
-    let artifact = manifest.artifact.expect("bundle artifact");
+    let artifact = manifest.git.bundle.expect("bundle artifact");
     let bundle = env
         .target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(&repo_id)
         .join(artifact.key);
     assert_eq!(std::fs::metadata(&bundle).unwrap().len(), artifact.size);
@@ -84,7 +84,7 @@ fn push_publishes_verified_bundle_then_manifest() {
                 .generation
         })
         .collect();
-    assert_eq!(generations, [1, 2, 3, 4]);
+    assert_eq!(generations, [1, 2]);
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn repository_creation_publishes_empty_manifest_without_artifact() {
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(manifest.refs.len(), 1);
     assert_eq!(manifest.head(), Some("refs/heads/main"));
-    assert!(manifest.artifact.is_none());
+    assert!(manifest.git.bundle.is_none());
 
     env.refuge()
         .args(["repo", "status", "empty"])
@@ -157,10 +157,10 @@ fn snapshot_listing_reports_a_missing_artifact_as_corrupt() {
 
     let path = manifests(&env.target, &repo_id).pop().unwrap();
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    let artifact = manifest.artifact.unwrap();
+    let artifact = manifest.git.bundle.unwrap();
     std::fs::remove_file(
         env.target
-            .join("refuge/v1/repos")
+            .join("refuge/v2/repos")
             .join(repo_id)
             .join(artifact.key),
     )
@@ -193,7 +193,7 @@ fn invalid_manifest_does_not_block_an_unrelated_repository() {
         .assert()
         .success()
         .stdout(contains("healthy"))
-        .stderr(contains(damaged_manifest.display().to_string()));
+        .stderr(predicates::str::is_empty());
 }
 
 #[test]
@@ -209,14 +209,14 @@ fn explicitly_selected_unsupported_manifest_is_rejected() {
     let path = manifests(&env.target, &repo_id).pop().unwrap();
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    value["schema_version"] = 2.into();
+    value["schema_version"] = 3.into();
     std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     let snapshot_id = path
         .file_name()
         .unwrap()
         .to_str()
         .unwrap()
-        .strip_suffix(".manifest.json")
+        .strip_suffix(".json")
         .unwrap();
 
     env.refuge()
@@ -231,6 +231,6 @@ fn explicitly_selected_unsupported_manifest_is_rejected() {
         .assert()
         .failure()
         .stderr(contains("Unsupported"))
-        .stderr(contains("schema version 2"));
+        .stderr(contains("schema version 3"));
     assert!(!env.repos.join("rejected.git").exists());
 }

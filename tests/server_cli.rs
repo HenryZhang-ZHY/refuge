@@ -229,7 +229,7 @@ fn serve_requires_an_injected_owner_secret() {
 fn serve_rejects_a_nonempty_uninitialized_runtime() {
     let temp = tempfile::tempdir().unwrap();
     let store = temp.path().join("store");
-    std::fs::create_dir_all(store.join("refuge/v1/repos")).unwrap();
+    std::fs::create_dir_all(store.join("refuge/v2/repos")).unwrap();
 
     let output = Command::new(cargo_bin!("refuge"))
         .arg("serve")
@@ -412,7 +412,6 @@ fn standard_git_clients_clone_push_and_fetch_over_http() {
 fn server_push_is_accepted_while_backup_is_pending_and_retries_automatically() {
     let temp = tempfile::tempdir().unwrap();
     let store = temp.path().join("store");
-    let target = backup_for(&store);
     let mut server = start_server(&store);
     let address = address(&mut server);
     create_repository(&address, "offline");
@@ -442,8 +441,8 @@ fn server_push_is_accepted_while_backup_is_pending_and_retries_automatically() {
             .success()
     );
 
-    let staging = target.join(".refuge-staging");
-    let saved_staging = target.join(".refuge-staging.saved");
+    let staging = store.join("repos/.refuge-staging");
+    let saved_staging = store.join("repos/.refuge-staging.saved");
     std::fs::rename(&staging, &saved_staging).unwrap();
     std::fs::write(&staging, "temporarily unavailable").unwrap();
 
@@ -530,13 +529,13 @@ fn standard_git_lfs_clients_upload_and_download_over_http() {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let archives = std::fs::read_dir(&target)
+        let objects = std::fs::read_dir(&target)
             .into_iter()
             .flatten()
             .flat_map(|entry| walk_files(entry.unwrap().path()))
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("tar"))
+            .filter(|path| path.to_string_lossy().contains("/lfs/objects/"))
             .count();
-        if archives > 0 {
+        if objects > 0 {
             break;
         }
         assert!(Instant::now() < deadline, "LFS snapshot was not published");

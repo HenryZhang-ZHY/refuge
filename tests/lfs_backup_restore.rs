@@ -62,15 +62,26 @@ fn write_lfs_object(repo: &Path, content: &[u8]) -> String {
     oid
 }
 
+fn reference_lfs_object(repo: &Path, oid: &str, size: usize, name: &str) {
+    let pointer = repo.parent().unwrap().join(format!("{name}.pointer"));
+    std::fs::write(
+        &pointer,
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n"),
+    )
+    .unwrap();
+    let blob = git(repo, &["hash-object", "-w", pointer.to_str().unwrap()]);
+    git(repo, &["update-ref", &format!("refs/notes/{name}"), &blob]);
+}
+
 fn read_manifest(target: &Path, repo_id: &str) -> Manifest {
     let snapshots = target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(repo_id)
         .join("snapshots");
     std::fs::read_dir(&snapshots)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.to_string_lossy().ends_with(".manifest.json"))
+        .filter(|path| path.to_string_lossy().ends_with(".json"))
         .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
         .max_by_key(|manifest: &Manifest| manifest.generation)
         .expect("a manifest was published")
@@ -107,7 +118,7 @@ fn backup_without_lfs_objects_omits_the_lfs_artifact() {
 
     let repo_id = repo_id_of(&_repos, "plain");
     let manifest = read_manifest(&target, &repo_id);
-    assert!(manifest.lfs_artifact.is_none());
+    assert!(manifest.lfs.is_none());
 }
 
 #[test]
@@ -124,6 +135,18 @@ fn backup_and_restore_round_trip_lfs_objects() {
 
     let first = write_lfs_object(&hosted, b"a large attachment, allegedly");
     let second = write_lfs_object(&hosted, b"another large attachment");
+    reference_lfs_object(
+        &hosted,
+        &first,
+        b"a large attachment, allegedly".len(),
+        "first",
+    );
+    reference_lfs_object(
+        &hosted,
+        &second,
+        b"another large attachment".len(),
+        "second",
+    );
 
     Command::cargo_bin("refuge")
         .unwrap()
@@ -135,12 +158,9 @@ fn backup_and_restore_round_trip_lfs_objects() {
 
     let repo_id = repo_id_of(&repos, "vault");
     let manifest = read_manifest(&target, &repo_id);
-    let lfs_artifact = manifest
-        .lfs_artifact
-        .expect("an LFS artifact was published");
-    assert_eq!(lfs_artifact.format, "lfs-archive");
+    let lfs_artifact = manifest.lfs.expect("LFS content was published").set;
     let archive_path = target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(&repo_id)
         .join(&lfs_artifact.key);
     let metadata = std::fs::metadata(&archive_path).unwrap();
@@ -182,6 +202,7 @@ fn backup_rejects_a_corrupt_lfs_object() {
     let hosted = repos.join("vault.git");
 
     let oid = write_lfs_object(&hosted, b"original content");
+    reference_lfs_object(&hosted, &oid, b"original content".len(), "corrupt");
     // Corrupt the object after naming it by oid, so its content hash no
     // longer matches its filename.
     let path = hosted
@@ -198,7 +219,7 @@ fn backup_rejects_a_corrupt_lfs_object() {
         .args(["repo", "backup", "vault"])
         .assert()
         .failure()
-        .stderr(contains("is corrupt"));
+        .stderr(contains("does not match artifact"));
 }
 
 #[test]
@@ -212,7 +233,8 @@ fn restore_rejects_a_tampered_lfs_archive() {
         .assert()
         .success();
     let hosted = repos.join("vault.git");
-    write_lfs_object(&hosted, b"a large attachment");
+    let oid = write_lfs_object(&hosted, b"a large attachment");
+    reference_lfs_object(&hosted, &oid, b"a large attachment".len(), "attachment");
     Command::cargo_bin("refuge")
         .unwrap()
         .env("REFUGE_CONFIG", &config)
@@ -223,11 +245,9 @@ fn restore_rejects_a_tampered_lfs_archive() {
     let repo_id = repo_id_of(&repos, "vault");
     let manifest = read_manifest(&target, &repo_id);
     let snapshot_id = manifest.snapshot_id.clone();
-    let lfs_artifact = manifest
-        .lfs_artifact
-        .expect("an LFS artifact was published");
+    let lfs_artifact = manifest.lfs.expect("LFS content was published").set;
     let archive_path = target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(&repo_id)
         .join(&lfs_artifact.key);
     let mut bytes = std::fs::read(&archive_path).unwrap();
@@ -247,7 +267,7 @@ fn restore_rejects_a_tampered_lfs_archive() {
         ])
         .assert()
         .failure()
-        .stderr(contains("checksum or size differs"));
+        .stderr(contains("LFS set"));
     assert!(!repos.join("tampered.git").exists());
 }
 
@@ -305,5 +325,5 @@ fn backup_requires_lfs_objects_referenced_only_by_history() {
         .success()
         .stdout(contains("LFS bytes"));
     let repo_id = repo_id_of(&repos, "history");
-    assert!(read_manifest(&target, &repo_id).lfs_artifact.is_some());
+    assert!(read_manifest(&target, &repo_id).lfs.is_some());
 }

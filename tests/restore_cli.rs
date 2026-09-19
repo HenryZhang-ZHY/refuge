@@ -65,13 +65,13 @@ fn initialize(temp: &tempfile::TempDir) -> (PathBuf, PathBuf, PathBuf) {
 fn manifest_count(target: &Path, repo_id: &str) -> usize {
     std::fs::read_dir(
         target
-            .join("refuge/v1/repos")
+            .join("refuge/v2/repos")
             .join(repo_id)
             .join("snapshots"),
     )
     .unwrap()
     .filter_map(Result::ok)
-    .filter(|entry| entry.path().to_string_lossy().ends_with(".manifest.json"))
+    .filter(|entry| entry.path().to_string_lossy().ends_with(".json"))
     .count()
 }
 
@@ -116,21 +116,21 @@ fn restored_repository_preserves_identity_and_can_back_up_again() {
     assert_eq!(manifest_count(&target, &repo_id), 2);
 
     let snapshots = target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(&repo_id)
         .join("snapshots");
     let manifest: Manifest = std::fs::read_dir(&snapshots)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.to_string_lossy().ends_with(".manifest.json"))
+        .filter(|path| path.to_string_lossy().ends_with(".json"))
         .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
         .max_by_key(|manifest: &Manifest| manifest.generation)
         .unwrap();
     let snapshot_id = manifest.snapshot_id.clone();
     let bundle = target
-        .join("refuge/v1/repos")
+        .join("refuge/v2/repos")
         .join(&repo_id)
-        .join(manifest.artifact.unwrap().key);
+        .join(manifest.git.bundle.unwrap().key);
     let original_bundle = std::fs::read(&bundle).unwrap();
     let mut tampered_bundle = original_bundle.clone();
     tampered_bundle[0] ^= 0xff;
@@ -148,7 +148,7 @@ fn restored_repository_preserves_identity_and_can_back_up_again() {
         ])
         .assert()
         .failure()
-        .stderr(contains("checksum or size differs"));
+        .stderr(contains("checksum differs from manifest"));
     assert!(!repos.join("tampered.git").exists());
 
     let parked = temp.path().join("parked-vault.git");
@@ -161,7 +161,7 @@ fn restored_repository_preserves_identity_and_can_back_up_again() {
         .success()
         .stdout(contains("restored fallback"))
         .stderr(contains("skipped newer snapshot"))
-        .stderr(contains("checksum or size differs"));
+        .stderr(contains("checksum differs from manifest"));
     assert!(
         git::ref_state(&repos.join("fallback.git"))
             .unwrap()
