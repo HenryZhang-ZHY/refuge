@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::catalog::{Catalog, Health};
 use crate::config::Config;
-use crate::git::{self, BatchCheck, RefState};
+use crate::git::{self, BatchCheck};
 use crate::layout::{self, RepoLayout};
 use crate::manifest::{self, Artifact, GitSection, LfsSection, Manifest};
 use crate::store::{self, Store};
@@ -52,7 +52,13 @@ pub fn backup_path(
     repository: &Path,
     options: BackupOptions,
 ) -> Result<BackupOutcome> {
-    backup_path_at(config, repository, options, OffsetDateTime::now_utc())
+    backup_path_at(
+        config,
+        repository,
+        options,
+        OffsetDateTime::now_utc(),
+        &|| {},
+    )
 }
 
 fn backup_path_at(
@@ -60,6 +66,7 @@ fn backup_path_at(
     repository: &Path,
     options: BackupOptions,
     now: OffsetDateTime,
+    after_bundle_created: &impl Fn(),
 ) -> Result<BackupOutcome> {
     let repo_id = Uuid::parse_str(&git::config_get(repository, "refuge.repoid")?)
         .context("repository has an invalid refuge.repoid")?;
@@ -123,7 +130,8 @@ fn backup_path_at(
         let (kind, bundle) = if state.refs.is_empty() {
             (SnapshotKind::Empty, None)
         } else if parent.is_none() {
-            create_bundle(repository, &staged_bundle, &snapshot_id, &state, &[])?;
+            create_bundle(repository, &staged_bundle, &[])?;
+            after_bundle_created();
             (
                 SnapshotKind::Checkpoint,
                 Some(bundle_artifact(&staged_bundle, &snapshot_id)?),
@@ -131,13 +139,8 @@ fn backup_path_at(
         } else if !git::has_objects_outside(repository, &exclusions)? {
             (SnapshotKind::RefsOnly, None)
         } else {
-            create_bundle(
-                repository,
-                &staged_bundle,
-                &snapshot_id,
-                &state,
-                &exclusions,
-            )?;
+            create_bundle(repository, &staged_bundle, &exclusions)?;
+            after_bundle_created();
             (
                 SnapshotKind::Delta,
                 Some(bundle_artifact(&staged_bundle, &snapshot_id)?),
@@ -149,6 +152,13 @@ fn backup_path_at(
                 continue;
             }
             bail!("repository refs changed while creating the bundle; retry the backup");
+        }
+        if bundle.is_some() {
+            for (name, oid) in git::bundle_list_heads(&staged_bundle)? {
+                if state.refs.get(&name) != Some(&oid) {
+                    bail!("bundle ref {name} differs from captured repository state");
+                }
+            }
         }
 
         let set = lfs::required_set(repository)?;
@@ -275,23 +285,12 @@ fn backup_path_at(
     unreachable!()
 }
 
-fn create_bundle(
-    repository: &Path,
-    destination: &Path,
-    _snapshot_id: &str,
-    state: &RefState,
-    exclusions: &[String],
-) -> Result<()> {
+fn create_bundle(repository: &Path, destination: &Path, exclusions: &[String]) -> Result<()> {
     if destination.exists() {
         fs::remove_file(destination)?;
     }
     git::bundle_create(repository, destination, exclusions)?;
     git::bundle_verify(repository, destination)?;
-    for (name, oid) in git::bundle_list_heads(destination)? {
-        if state.refs.get(&name) != Some(&oid) {
-            bail!("bundle ref {name} differs from captured repository state");
-        }
-    }
     Ok(())
 }
 
@@ -368,4 +367,86 @@ fn checkpoint_due(catalog: &Catalog, newest: &Manifest) -> bool {
         .map(|bundle| bundle.size)
         .sum::<u64>()
         >= root_size
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn ref_change_after_bundle_creation_retries_before_checking_heads() {
+        let temp = tempfile::tempdir().unwrap();
+        let repos = temp.path().join("repos");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&repos).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let repository = repos.join("notes.git");
+        git::init_bare(&repository).unwrap();
+        let repo_id = Uuid::now_v7();
+        git::config_set(&repository, "refuge.repoid", &repo_id.to_string()).unwrap();
+        let first = repository.join("first");
+        let second = repository.join("second");
+        fs::write(&first, "first").unwrap();
+        fs::write(&second, "second").unwrap();
+        let first_oid = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["-c", "safe.bareRepository=all", "-C"])
+                .arg(&repository)
+                .args(["hash-object", "-w"])
+                .arg(&first)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let second_oid = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["-c", "safe.bareRepository=all", "-C"])
+                .arg(&repository)
+                .args(["hash-object", "-w"])
+                .arg(&second)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        git::create_refs(
+            &repository,
+            &std::collections::BTreeMap::from([(
+                "refs/notes/state".into(),
+                first_oid.trim().into(),
+            )]),
+        )
+        .unwrap();
+        let changed = AtomicBool::new(false);
+        let hook = || {
+            if !changed.swap(true, Ordering::SeqCst) {
+                std::process::Command::new("git")
+                    .args(["-c", "safe.bareRepository=all", "-C"])
+                    .arg(&repository)
+                    .args(["update-ref", "refs/notes/state", second_oid.trim()])
+                    .status()
+                    .unwrap();
+            }
+        };
+        let config = Config {
+            repos_dir: repos,
+            target_root: target,
+            instance_id: Uuid::nil(),
+        };
+        let outcome = backup_path_at(
+            &config,
+            &repository,
+            BackupOptions::default(),
+            OffsetDateTime::UNIX_EPOCH,
+            &hook,
+        )
+        .unwrap();
+        let BackupOutcome::Published { manifest, .. } = outcome else {
+            panic!("expected publication")
+        };
+        assert_eq!(manifest.ref_state(), git::ref_state(&repository).unwrap());
+    }
 }
