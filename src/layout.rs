@@ -59,10 +59,12 @@ impl RepoLayout {
             .map(|part| part.to_string_lossy())
             .collect::<Vec<_>>();
         let valid = match parts.as_slice() {
-            [git, name] if git == "git" => name.ends_with(".bundle") && name.len() > 7,
-            [snapshots, name] if snapshots == "snapshots" => {
-                name.ends_with(".json") && name.len() > 5
-            }
+            [git, name] if git == "git" => name
+                .strip_suffix(".bundle")
+                .is_some_and(valid_snapshot_component),
+            [snapshots, name] if snapshots == "snapshots" => name
+                .strip_suffix(".json")
+                .is_some_and(valid_snapshot_component),
             [lfs, sets, name] if lfs == "lfs" && sets == "sets" => {
                 name.strip_suffix(".txt").is_some_and(is_sha256_hex)
             }
@@ -83,6 +85,13 @@ fn is_sha256_hex(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn valid_snapshot_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 pub fn locks_dir(config: &Config) -> PathBuf {
@@ -134,6 +143,8 @@ mod tests {
             "/git/id.bundle",
             "git\\id.bundle",
             "git/id",
+            "git/bad name.bundle",
+            "snapshots/bad.name.json",
             "lfs/objects/ab/not-an-oid",
             "other/id.json",
         ] {

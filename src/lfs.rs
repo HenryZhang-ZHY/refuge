@@ -83,6 +83,9 @@ pub fn decode_set(bytes: &[u8], expected_checksum: &str) -> Result<LfsSet> {
     if actual != expected {
         bail!("LFS set checksum differs from its key");
     }
+    if bytes.is_empty() {
+        bail!("LFS set is empty");
+    }
     if !bytes.is_empty() && !bytes.ends_with(b"\n") {
         bail!("LFS set has no final newline");
     }

@@ -365,7 +365,7 @@ pub fn load_server_config(root: &Path, backup_root: &Path) -> Result<Config> {
 }
 
 fn restore_runtime_if_empty(config: &Config) -> Result<()> {
-    if std::fs::read_dir(&config.repos_dir)?.next().is_some() {
+    if !crate::repo::list(config)?.is_empty() {
         return Ok(());
     }
     let catalogs = crate::catalog::list_targets(&config.target_root, None)
