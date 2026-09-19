@@ -241,7 +241,6 @@ fn backup_path_at(
             match store.stat(&section.set.key)? {
                 None => {
                     let written = store.publish_bytes(&set_bytes, &section.set.key)?;
-                    lfs_bytes_written += written.bytes_written;
                     warnings.extend(written.warnings);
                 }
                 Some(size) if size == section.set.size => {}

@@ -578,11 +578,19 @@ fn print_backup_outcome(outcome: &refuge::backup::BackupOutcome) {
                 refuge::backup::SnapshotKind::Delta => "delta",
                 refuge::backup::SnapshotKind::RefsOnly => "refs only",
             };
-            println!(
-                "protected {} {} refs ({kind}, {git_bytes_written} git bytes, {lfs_bytes_written} LFS bytes written)",
-                manifest.snapshot_id,
-                manifest.object_ref_count()
-            );
+            if matches!(kind, "empty" | "refs only") {
+                println!(
+                    "protected {} {} refs ({kind}, 0 bytes written)",
+                    manifest.snapshot_id,
+                    manifest.object_ref_count()
+                );
+            } else {
+                println!(
+                    "protected {} {} refs ({kind}, {git_bytes_written} git bytes, {lfs_bytes_written} LFS bytes written)",
+                    manifest.snapshot_id,
+                    manifest.object_ref_count()
+                );
+            }
             for warning in warnings {
                 eprintln!("refuge: warning: {warning}");
             }
