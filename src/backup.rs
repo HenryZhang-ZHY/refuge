@@ -1,387 +1,371 @@
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use time::macros::format_description;
 use uuid::Uuid;
 
+use crate::catalog::{Catalog, Health};
 use crate::config::Config;
-use crate::git::{self, RefState};
-use crate::lfs;
-use crate::manifest::{self, Artifact, Manifest};
-use crate::repo;
-use crate::storage::{self, FsSnapshotStore};
+use crate::git::{self, BatchCheck, RefState};
+use crate::layout::{self, RepoLayout};
+use crate::manifest::{self, Artifact, GitSection, LfsSection, Manifest};
+use crate::store::{self, Store};
+use crate::{lfs, repo};
 
-#[derive(Serialize)]
-struct RepoEnvelope<'a> {
-    schema_version: u32,
-    repo_id: Uuid,
-    name: &'a str,
-    created_at: &'a str,
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BackupOptions {
+    pub checkpoint: bool,
 }
 
-pub struct BackupOutcome {
-    pub manifest: Manifest,
-    pub warnings: Vec<String>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotKind {
+    Empty,
+    Checkpoint,
+    Delta,
+    RefsOnly,
 }
 
-pub fn backup_named(config: &Config, name: &str) -> Result<BackupOutcome> {
-    backup_path(config, &repo::find(config, name)?)
+#[allow(clippy::large_enum_variant)] // Public shape is fixed by the v2 format plan.
+pub enum BackupOutcome {
+    AlreadyProtected {
+        snapshot_id: String,
+    },
+    Published {
+        manifest: Manifest,
+        kind: SnapshotKind,
+        git_bytes_written: u64,
+        lfs_bytes_written: u64,
+        lfs_objects_written: u64,
+        warnings: Vec<String>,
+    },
 }
 
-pub fn backup_path(config: &Config, path: &Path) -> Result<BackupOutcome> {
-    backup_path_at(config, path, OffsetDateTime::now_utc(), || {})
+pub fn backup_named(config: &Config, name: &str, options: BackupOptions) -> Result<BackupOutcome> {
+    backup_path(config, &repo::find(config, name)?, options)
+}
+
+pub fn backup_path(
+    config: &Config,
+    repository: &Path,
+    options: BackupOptions,
+) -> Result<BackupOutcome> {
+    backup_path_at(config, repository, options, OffsetDateTime::now_utc())
 }
 
 fn backup_path_at(
     config: &Config,
-    path: &Path,
+    repository: &Path,
+    options: BackupOptions,
     now: OffsetDateTime,
-    after_bundle_created: impl Fn(),
 ) -> Result<BackupOutcome> {
-    let repo_id = Uuid::parse_str(&git::config_get(path, "refuge.repoid")?)
+    let repo_id = Uuid::parse_str(&git::config_get(repository, "refuge.repoid")?)
         .context("repository has an invalid refuge.repoid")?;
-    let repo_name = repository_name(path)?;
-
-    let staging = config.target_root.join(".refuge-staging");
-    fs::create_dir_all(&staging)
-        .with_context(|| format!("could not create {}", staging.display()))?;
-    let lock_path = staging.join(format!("{repo_id}.lock"));
-    let lock_file = OpenOptions::new()
+    let file_name = repository
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("repository path has no valid UTF-8 name")?;
+    let repo_name = file_name
+        .strip_suffix(".git")
+        .unwrap_or(file_name)
+        .to_owned();
+    let locks = layout::locks_dir(config);
+    fs::create_dir_all(&locks)?;
+    let lock_path = locks.join(format!("{repo_id}.lock"));
+    let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("could not open lock file {}", lock_path.display()))?;
-    // Generation selection, artifact publication, and manifest publication
-    // form one per-repository transaction. OS locks are released on crashes.
-    fs2::FileExt::lock_exclusive(&lock_file).context("could not lock repository backup")?;
-
-    let repository_root = config
-        .target_root
-        .join("refuge/v1/repos")
-        .join(repo_id.to_string());
-    let snapshots = repository_root.join("snapshots");
-    fs::create_dir_all(&snapshots)
-        .with_context(|| format!("could not create {}", snapshots.display()))?;
-
-    let generation = next_generation(&snapshots)?;
-    let created_at = now.format(&Rfc3339).context("could not format time")?;
-    let compact = now
-        .format(format_description!(
-            "[year][month][day]T[hour][minute][second]Z"
-        ))
-        .context("could not format snapshot id")?;
-    let instance = config.instance_id.simple().to_string();
-    let snapshot_id = format!("{compact}-g{generation}-{}", &instance[..8]);
-
-    // A snapshot id is only unique within one repository namespace. Give
-    // every operation its own exclusively created directory so repositories
-    // with the same generation and timestamp can never share intermediate
-    // bundle or LFS paths.
+    fs2::FileExt::lock_exclusive(&lock).context("could not lock repository backup")?;
+    let staging = layout::staging_dir(config);
+    fs::create_dir_all(&staging)?;
     let operation = tempfile::Builder::new()
         .prefix(&format!("{repo_id}-"))
-        .tempdir_in(&staging)
-        .with_context(|| {
-            format!(
-                "could not create staging directory in {}",
-                staging.display()
+        .tempdir_in(&staging)?;
+    let layout = RepoLayout::new(&config.target_root, repo_id);
+    let store = Store::new(layout.clone());
+    let mut warnings = store.sweep_partials()?;
+
+    for attempt in 0..2 {
+        let state = git::ref_state(repository)?;
+        let catalog = Catalog::load(layout.clone())?;
+        let newest = catalog.newest();
+        if let Some(newest) = newest
+            && newest.instance_id != config.instance_id
+        {
+            warnings.push(format!(
+                "newest snapshot {} was published by another Refuge instance",
+                newest.snapshot_id
+            ));
+        }
+        if !options.checkpoint
+            && let Some(newest) = newest
+            && catalog.health(newest) == Health::Valid
+            && newest.ref_state_hash == state.hash()
+        {
+            return Ok(BackupOutcome::AlreadyProtected {
+                snapshot_id: newest.snapshot_id.clone(),
+            });
+        }
+        let generation = catalog
+            .max_generation_from_manifests()
+            .max(catalog.max_generation_from_file_names())
+            .checked_add(1)
+            .context("snapshot generation overflow")?;
+        let snapshot_id = layout::snapshot_id(now, generation, config.instance_id);
+        let (parent, exclusions) = choose_parent(repository, &catalog, newest, options.checkpoint)?;
+        let staged_bundle = operation.path().join("snapshot.bundle");
+        let (kind, bundle) = if state.refs.is_empty() {
+            (SnapshotKind::Empty, None)
+        } else if parent.is_none() {
+            create_bundle(repository, &staged_bundle, &snapshot_id, &state, &[])?;
+            (
+                SnapshotKind::Checkpoint,
+                Some(bundle_artifact(&staged_bundle, &snapshot_id)?),
             )
-        })?;
-    let staged_bundle = operation.path().join(format!("{snapshot_id}.bundle"));
-
-    let (state, artifact) =
-        create_artifact(path, &snapshot_id, &staged_bundle, after_bundle_created)?;
-    let staged_lfs = operation.path().join(format!("{snapshot_id}.lfs.tar"));
-    let lfs_artifact = create_lfs_artifact(path, &snapshot_id, &staged_lfs, &state)?;
-    let mut warnings = write_repo_envelope(&repository_root, repo_id, &repo_name, &created_at)?
-        .warnings()
-        .to_vec();
-
-    let manifest = Manifest {
-        schema_version: 1,
-        repo_id,
-        repo_name,
-        instance_id: config.instance_id,
-        snapshot_id: snapshot_id.clone(),
-        created_at,
-        generation,
-        ref_state_hash: state.hash(),
-        refs: Manifest::refs_from(&state),
-        artifact,
-        lfs_artifact,
-        encryption: None,
-        refuge_version: env!("CARGO_PKG_VERSION").to_owned(),
-    };
-    let manifest_path = snapshots.join(format!("{snapshot_id}.manifest.json"));
-    let mut published = Vec::new();
-    if let Some(descriptor) = &manifest.artifact {
-        let destination = snapshots.join(format!("{snapshot_id}.bundle"));
-        let outcome = FsSnapshotStore.publish_file(
-            &staged_bundle,
-            &destination,
-            &descriptor.checksum,
-            descriptor.size,
-        )?;
-        warnings.extend(outcome.warnings().iter().cloned());
-        published.push(destination);
-    }
-    if let Some(descriptor) = &manifest.lfs_artifact {
-        let destination = snapshots.join(format!("{snapshot_id}.lfs.tar"));
-        match FsSnapshotStore.publish_file(
-            &staged_lfs,
-            &destination,
-            &descriptor.checksum,
-            descriptor.size,
-        ) {
-            Ok(outcome) => {
-                warnings.extend(outcome.warnings().iter().cloned());
-                published.push(destination);
+        } else if !git::has_objects_outside(repository, &exclusions)? {
+            (SnapshotKind::RefsOnly, None)
+        } else {
+            create_bundle(
+                repository,
+                &staged_bundle,
+                &snapshot_id,
+                &state,
+                &exclusions,
+            )?;
+            (
+                SnapshotKind::Delta,
+                Some(bundle_artifact(&staged_bundle, &snapshot_id)?),
+            )
+        };
+        if git::ref_state(repository)? != state {
+            let _ = fs::remove_file(&staged_bundle);
+            if attempt == 0 {
+                continue;
             }
+            bail!("repository refs changed while creating the bundle; retry the backup");
+        }
+
+        let set = lfs::required_set(repository)?;
+        if git::ref_state(repository)? != state {
+            let _ = fs::remove_file(&staged_bundle);
+            if attempt == 0 {
+                continue;
+            }
+            bail!("repository refs changed while creating the bundle; retry the backup");
+        }
+        let (set_bytes, lfs_section) = if set.is_empty() {
+            (Vec::new(), None)
+        } else {
+            let (bytes, artifact) = lfs::encode_set(&set);
+            let size = set
+                .values()
+                .try_fold(0u64, |sum, value| sum.checked_add(*value))
+                .context("LFS size overflow")?;
+            (
+                bytes,
+                Some(LfsSection {
+                    set: artifact,
+                    count: set.len() as u64,
+                    size,
+                }),
+            )
+        };
+        let mut publish_objects = Vec::new();
+        for (oid, size) in &set {
+            let key = RepoLayout::lfs_object_key(oid);
+            match store.stat(&key)? {
+                Some(actual) if actual == *size => {}
+                Some(actual) => bail!(
+                    "target LFS object {oid} has size {actual}, expected {size}; the backup target is damaged — move the file aside and retry"
+                ),
+                None => {
+                    let path = lfs::local_object_path(repository, oid);
+                    let metadata = fs::symlink_metadata(&path)
+                        .with_context(|| format!("required LFS object {oid} is missing"))?;
+                    if !metadata.file_type().is_file() || metadata.len() != *size {
+                        bail!("required LFS object {oid} is missing");
+                    }
+                    publish_objects.push((oid.clone(), *size, path));
+                }
+            }
+        }
+        let manifest = Manifest {
+            schema_version: 2,
+            repo_id,
+            repo_name: repo_name.clone(),
+            instance_id: config.instance_id,
+            snapshot_id: snapshot_id.clone(),
+            created_at: now.format(&Rfc3339)?,
+            generation,
+            refuge_version: env!("CARGO_PKG_VERSION").into(),
+            ref_state_hash: state.hash(),
+            refs: Manifest::refs_from(&state),
+            git: GitSection {
+                parent: parent.map(|value| value.snapshot_id.clone()),
+                bundle: bundle.clone(),
+            },
+            lfs: lfs_section.clone(),
+        };
+        manifest::validate(&layout.manifest_path(&snapshot_id), &manifest)?;
+
+        let mut lfs_bytes_written = 0;
+        let mut lfs_objects_written = 0;
+        for (oid, size, path) in publish_objects {
+            let artifact = Artifact {
+                key: RepoLayout::lfs_object_key(&oid),
+                size,
+                checksum: format!("sha256:{oid}"),
+            };
+            let written = store.publish_file(&path, &artifact.key, &artifact)?;
+            lfs_bytes_written += written.bytes_written;
+            lfs_objects_written += 1;
+            warnings.extend(written.warnings);
+        }
+        if let Some(section) = &lfs_section {
+            match store.stat(&section.set.key)? {
+                None => {
+                    let written = store.publish_bytes(&set_bytes, &section.set.key)?;
+                    lfs_bytes_written += written.bytes_written;
+                    warnings.extend(written.warnings);
+                }
+                Some(size) if size == section.set.size => {}
+                Some(size) => bail!(
+                    "target LFS set {} has size {size}, expected {}; the backup target is damaged — move the file aside and retry",
+                    section.set.key,
+                    section.set.size
+                ),
+            }
+        }
+        let mut git_bytes_written = 0;
+        if let Some(bundle) = &bundle {
+            if store.stat(&bundle.key)?.is_some() {
+                store.remove(&bundle.key)?;
+            }
+            let written = store.publish_file(&staged_bundle, &bundle.key, bundle)?;
+            git_bytes_written = written.bytes_written;
+            warnings.extend(written.warnings);
+        }
+        let mut bytes = serde_json::to_vec_pretty(&manifest)?;
+        bytes.push(b'\n');
+        let manifest_key = format!("snapshots/{snapshot_id}.json");
+        match store.publish_bytes(&bytes, &manifest_key) {
+            Ok(written) => warnings.extend(written.warnings),
             Err(error) => {
-                cleanup_uncommitted(&published);
+                if let Some(bundle) = &bundle {
+                    let _ = store.remove(&bundle.key);
+                }
                 return Err(error);
             }
         }
+        return Ok(BackupOutcome::Published {
+            manifest,
+            kind,
+            git_bytes_written,
+            lfs_bytes_written,
+            lfs_objects_written,
+            warnings,
+        });
     }
-    // The manifest is the publication marker. Nothing may make a snapshot
-    // discoverable until its artifact has been durably renamed into place.
-    match write_json_atomic(&manifest_path, &manifest) {
-        Ok(outcome) => warnings.extend(outcome.warnings().iter().cloned()),
-        Err(error) => {
-            cleanup_uncommitted(&published);
-            return Err(error);
-        }
-    }
-    Ok(BackupOutcome { manifest, warnings })
+    unreachable!()
 }
 
-fn create_artifact(
-    repo_path: &Path,
-    snapshot_id: &str,
-    staged_bundle: &Path,
-    after_bundle_created: impl Fn(),
-) -> Result<(RefState, Option<Artifact>)> {
-    let mut state = git::ref_state(repo_path)?;
-    if state.refs.is_empty() {
-        return Ok((state, None));
+fn create_bundle(
+    repository: &Path,
+    destination: &Path,
+    _snapshot_id: &str,
+    state: &RefState,
+    exclusions: &[String],
+) -> Result<()> {
+    if destination.exists() {
+        fs::remove_file(destination)?;
     }
-
-    for attempt in 0..2 {
-        if staged_bundle.exists() {
-            fs::remove_file(staged_bundle)?;
-        }
-        git::bundle_create(repo_path, staged_bundle)?;
-        after_bundle_created();
-        git::bundle_verify(repo_path, staged_bundle)?;
-        if git::bundle_list_heads(staged_bundle)? == state.refs {
-            let (checksum, size) = storage::checksum(staged_bundle)?;
-            let file_name = format!("{snapshot_id}.bundle");
-            return Ok((
-                state,
-                Some(Artifact {
-                    key: format!("snapshots/{file_name}"),
-                    size,
-                    checksum,
-                    format: "git-bundle".to_owned(),
-                    format_version: 2,
-                }),
-            ));
-        }
-        if attempt == 0 {
-            state = git::ref_state(repo_path)?;
+    git::bundle_create(repository, destination, exclusions)?;
+    git::bundle_verify(repository, destination)?;
+    for (name, oid) in git::bundle_list_heads(destination)? {
+        if state.refs.get(&name) != Some(&oid) {
+            bail!("bundle ref {name} differs from captured repository state");
         }
     }
-    let _ = fs::remove_file(staged_bundle);
-    bail!("repository refs changed while creating the bundle; retry the backup")
+    Ok(())
 }
 
-fn create_lfs_artifact(
-    repo_path: &Path,
-    snapshot_id: &str,
-    staged_archive: &Path,
-    expected_state: &RefState,
-) -> Result<Option<Artifact>> {
-    if git::ref_state(repo_path)? != *expected_state {
-        bail!("repository refs changed before LFS validation; retry the backup");
-    }
-    if !lfs::create_archive(repo_path, staged_archive)? {
-        return Ok(None);
-    }
-    if git::ref_state(repo_path)? != *expected_state {
-        bail!("repository refs changed while creating the LFS archive; retry the backup");
-    }
-
-    let (checksum, size) = storage::checksum(staged_archive)?;
-    let file_name = format!("{snapshot_id}.lfs.tar");
-    Ok(Some(Artifact {
-        key: format!("snapshots/{file_name}"),
+fn bundle_artifact(path: &Path, snapshot_id: &str) -> Result<Artifact> {
+    let (checksum, size) = store::sha256_file(path)?;
+    Ok(Artifact {
+        key: RepoLayout::bundle_key(snapshot_id),
         size,
         checksum,
-        format: "lfs-archive".to_owned(),
-        format_version: 1,
-    }))
+    })
 }
 
-fn cleanup_uncommitted(paths: &[std::path::PathBuf]) {
-    for path in paths {
-        let _ = fs::remove_file(path);
+fn choose_parent<'a>(
+    repository: &Path,
+    catalog: &'a Catalog,
+    newest: Option<&'a Manifest>,
+    force: bool,
+) -> Result<(Option<&'a Manifest>, Vec<String>)> {
+    let Some(newest) = newest else {
+        return Ok((None, Vec::new()));
+    };
+    if force
+        || catalog.health(newest) != Health::Valid
+        || newest.object_ref_count() == 0
+        || checkpoint_due(catalog, newest)
+    {
+        return Ok((None, Vec::new()));
     }
-}
-
-fn next_generation(snapshots: &Path) -> Result<u64> {
-    let mut generation = 0;
-    for path in manifest::paths_in(snapshots)? {
-        let manifest = manifest::read(&path)?;
-        generation = generation.max(manifest.generation);
+    let tips = newest.ref_state().refs.into_values().collect::<Vec<_>>();
+    if tips.is_empty() {
+        return Ok((None, Vec::new()));
     }
-    generation
-        .checked_add(1)
-        .context("snapshot generation overflow")
-}
-
-fn write_repo_envelope(
-    root: &Path,
-    id: Uuid,
-    name: &str,
-    created_at: &str,
-) -> Result<storage::CommitOutcome> {
-    let destination = root.join("repo.json");
-    if destination.exists() {
-        return Ok(storage::CommitOutcome::Committed);
+    let mut names = Vec::with_capacity(tips.len() * 2);
+    for oid in &tips {
+        names.push(oid.clone());
+        names.push(format!("{oid}^{{commit}}"));
     }
-    write_json_atomic(
-        &destination,
-        &RepoEnvelope {
-            schema_version: 1,
-            repo_id: id,
-            name,
-            created_at,
-        },
-    )
-}
-
-fn write_json_atomic<T: Serialize>(
-    destination: &Path,
-    value: &T,
-) -> Result<storage::CommitOutcome> {
-    let mut bytes = serde_json::to_vec_pretty(value)?;
-    bytes.push(b'\n');
-    FsSnapshotStore.publish_bytes(&bytes, destination)
-}
-
-fn repository_name(path: &Path) -> Result<String> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("repository path has no valid UTF-8 name")?;
-    Ok(file_name
-        .strip_suffix(".git")
-        .unwrap_or(file_name)
-        .to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::sync::{Arc, Barrier};
-
-    use super::*;
-
-    fn repository(root: &Path, name: &str, id: Uuid, content: &str) -> PathBuf {
-        let path = root.join(format!("{name}.git"));
-        git::init_bare(&path).unwrap();
-        git::config_set(&path, "refuge.repoid", &id.to_string()).unwrap();
-
-        let input = root.join(format!("{name}.txt"));
-        fs::write(&input, content).unwrap();
-        let output = Command::new("git")
-            .args(["-c", "safe.bareRepository=all"])
-            .arg("-C")
-            .arg(&path)
-            .args(["hash-object", "-w"])
-            .arg(&input)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let oid = String::from_utf8(output.stdout).unwrap();
-        let output = Command::new("git")
-            .args(["-c", "safe.bareRepository=all"])
-            .arg("-C")
-            .arg(&path)
-            .args(["update-ref", "refs/notes/snapshot", oid.trim()])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        path
-    }
-
-    #[test]
-    fn simultaneous_repositories_with_the_same_snapshot_id_use_isolated_staging() {
-        let temp = tempfile::tempdir().unwrap();
-        let repos = temp.path().join("repos");
-        let target = temp.path().join("target");
-        fs::create_dir_all(&repos).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        let config = Config {
-            repos_dir: repos.clone(),
-            target_root: target.clone(),
-            instance_id: Uuid::nil(),
-        };
-        let first = repository(&repos, "first", Uuid::now_v7(), "first repository");
-        let second = repository(&repos, "second", Uuid::now_v7(), "second repository");
-        let barrier = Arc::new(Barrier::new(2));
-        let now = OffsetDateTime::UNIX_EPOCH;
-
-        let handles: Vec<_> = [first, second]
-            .into_iter()
-            .map(|path| {
-                let config = config.clone();
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    backup_path_at(&config, &path, now, || {
-                        barrier.wait();
-                    })
-                })
-            })
-            .collect();
-        let outcomes: Vec<_> = handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap().unwrap())
-            .collect();
-
-        assert_eq!(
-            outcomes[0].manifest.snapshot_id,
-            outcomes[1].manifest.snapshot_id
-        );
-        for outcome in outcomes {
-            let manifest = outcome.manifest;
-            let expected_refs = manifest
-                .refs
-                .iter()
-                .filter_map(|(name, value)| match value {
-                    crate::manifest::ManifestRef::Object(oid) => Some((name.clone(), oid.clone())),
-                    crate::manifest::ManifestRef::Symbolic { .. } => None,
-                })
-                .collect();
-            let artifact = manifest.artifact.unwrap();
-            let bundle = target
-                .join("refuge/v1/repos")
-                .join(manifest.repo_id.to_string())
-                .join(artifact.key);
-            assert_eq!(git::bundle_list_heads(&bundle).unwrap(), expected_refs);
+    let checks = git::batch_check(repository, &names)?;
+    let mut exclusions = BTreeSet::new();
+    for pair in checks.chunks_exact(2) {
+        if matches!(pair[0], BatchCheck::Missing) {
+            return Ok((None, Vec::new()));
         }
-
-        let staging = target.join(".refuge-staging");
-        assert!(
-            fs::read_dir(staging)
-                .unwrap()
-                .all(|entry| entry.unwrap().path().is_file())
-        );
+        if let BatchCheck::Found { oid, kind, .. } = &pair[1]
+            && kind == "commit"
+        {
+            exclusions.insert(oid.clone());
+        }
     }
+    if exclusions.is_empty() || exclusions.len() > git::MAX_EXCLUSIONS {
+        return Ok((None, Vec::new()));
+    }
+    Ok((Some(newest), exclusions.into_iter().collect()))
+}
+
+fn checkpoint_due(catalog: &Catalog, newest: &Manifest) -> bool {
+    let Ok(chain) = catalog.chain(newest) else {
+        return true;
+    };
+    if chain.len() >= 256 {
+        return true;
+    }
+    let Some(root_size) = chain
+        .first()
+        .and_then(|root| root.git.bundle.as_ref())
+        .map(|bundle| bundle.size)
+    else {
+        return true;
+    };
+    chain
+        .iter()
+        .skip(1)
+        .filter_map(|item| item.git.bundle.as_ref())
+        .map(|bundle| bundle.size)
+        .sum::<u64>()
+        >= root_size
 }

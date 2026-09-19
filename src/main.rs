@@ -180,6 +180,9 @@ enum RepoCommands {
         /// working copy.
         #[arg(value_name = "NAME_OR_REPO_ID", default_value = ".")]
         selector: String,
+        /// Force a full checkpoint even when a delta is sufficient.
+        #[arg(long)]
+        checkpoint: bool,
     },
     /// Show whether hosted repositories match their newest snapshots.
     #[command(
@@ -212,6 +215,22 @@ enum SnapshotCommands {
         #[arg(value_name = "NAME_OR_REPO_ID")]
         name_or_repo_id: Option<String>,
         /// Read from this target instead of the configured target.
+        #[arg(long, value_name = "SYNC_DIR")]
+        target: Option<PathBuf>,
+    },
+    /// Deeply verify a snapshot by restoring it into temporary storage.
+    Verify {
+        #[arg(value_name = "NAME_OR_REPO_ID")]
+        selector: String,
+        #[arg(long, value_name = "SNAPSHOT_ID")]
+        snapshot: Option<String>,
+        #[arg(long, value_name = "SYNC_DIR")]
+        target: Option<PathBuf>,
+    },
+    /// Explain storage use by repository and artifact class.
+    Usage {
+        #[arg(value_name = "NAME_OR_REPO_ID")]
+        selector: Option<String>,
         #[arg(long, value_name = "SYNC_DIR")]
         target: Option<PathBuf>,
     },
@@ -339,7 +358,7 @@ fn run() -> Result<()> {
                     } else {
                         (refuge::repo::resolve(&config, &selector)?, None)
                     };
-                    let state = refuge::discovery::repository_status(&config, &repository)?;
+                    let state = refuge::catalog::repository_status(&config, &repository)?;
                     let head = refuge::git::ref_state(&repository.path)?
                         .head
                         .unwrap_or_else(|| "(detached)".to_owned());
@@ -352,9 +371,16 @@ fn run() -> Result<()> {
                     println!("Default branch: {head}");
                     println!("Status: {}", protection_description(state));
                 }
-                RepoCommands::Backup { selector } => {
+                RepoCommands::Backup {
+                    selector,
+                    checkpoint,
+                } => {
                     let repository = refuge::repo::resolve(&config, &selector)?;
-                    let outcome = refuge::backup::backup_path(&config, &repository.path)?;
+                    let outcome = refuge::backup::backup_path(
+                        &config,
+                        &repository.path,
+                        refuge::backup::BackupOptions { checkpoint },
+                    )?;
                     print_backup_outcome(&outcome);
                 }
                 RepoCommands::Status { selector, all } => {
@@ -363,7 +389,7 @@ fn run() -> Result<()> {
                     } else {
                         Some(selector.as_deref().unwrap_or("."))
                     };
-                    for (repository, state) in refuge::discovery::statuses(&config, selector)? {
+                    for (repository, state) in refuge::catalog::statuses(&config, selector)? {
                         let description = protection_description(state);
                         println!("{}: {description}", repository.name);
                     }
@@ -379,23 +405,88 @@ fn run() -> Result<()> {
         } => {
             let config = refuge::config::Config::load()?;
             let target = target.as_deref().unwrap_or(&config.target_root);
-            let catalog = refuge::discovery::list_snapshots(target, name_or_repo_id.as_deref())?;
-            for snapshot in catalog.snapshots {
-                println!(
-                    "{} {} generation {} {}",
-                    snapshot.manifest.repo_name,
-                    snapshot.manifest.snapshot_id,
-                    snapshot.manifest.generation,
-                    snapshot.health
-                );
+            for (_, catalog) in refuge::catalog::list_targets(target, name_or_repo_id.as_deref())? {
+                for manifest in catalog.ordered() {
+                    let kind = match (
+                        &manifest.git.parent,
+                        &manifest.git.bundle,
+                        manifest.object_ref_count(),
+                    ) {
+                        (_, _, 0) => "empty",
+                        (None, _, _) => "checkpoint",
+                        (Some(_), Some(_), _) => "delta",
+                        (Some(_), None, _) => "refs-only",
+                    };
+                    let bytes = manifest.git.bundle.as_ref().map_or(0, |bundle| bundle.size);
+                    println!(
+                        "{} {} g{} {} {} {}",
+                        manifest.repo_name,
+                        manifest.snapshot_id,
+                        manifest.generation,
+                        kind,
+                        bytes,
+                        catalog.health(manifest)
+                    );
+                }
+                for diagnostic in catalog.diagnostics() {
+                    eprintln!(
+                        "{} {:?}: {}",
+                        diagnostic.path.display(),
+                        diagnostic.kind,
+                        diagnostic.reason
+                    );
+                }
             }
-            for diagnostic in catalog.diagnostics {
-                eprintln!(
-                    "{} {:?}: {}",
-                    diagnostic.path.display(),
-                    diagnostic.kind,
-                    diagnostic.reason
+        }
+        Commands::Snapshots {
+            command:
+                SnapshotCommands::Verify {
+                    selector,
+                    snapshot,
+                    target,
+                },
+        } => {
+            let config = refuge::config::Config::load()?;
+            let target = target.as_deref().unwrap_or(&config.target_root);
+            let id = refuge::verify::verify(&config, &selector, snapshot.as_deref(), target)?;
+            println!("verified {id}");
+        }
+        Commands::Snapshots {
+            command: SnapshotCommands::Usage { selector, target },
+        } => {
+            let config = refuge::config::Config::load()?;
+            let target = target.as_deref().unwrap_or(&config.target_root);
+            for item in refuge::verify::usage(target, selector.as_deref())? {
+                println!("{} {}", item.repo_name, item.repo_id);
+                println!(
+                    "  checkpoints {:>4} {:>12} bytes",
+                    item.checkpoints.0, item.checkpoints.1
                 );
+                println!(
+                    "  deltas      {:>4} {:>12} bytes",
+                    item.deltas.0, item.deltas.1
+                );
+                println!(
+                    "  lfs objects {:>4} {:>12} bytes",
+                    item.lfs_objects.0, item.lfs_objects.1
+                );
+                println!(
+                    "  lfs sets    {:>4} {:>12} bytes",
+                    item.lfs_sets.0, item.lfs_sets.1
+                );
+                println!(
+                    "  manifests   {:>4} {:>12} bytes",
+                    item.manifests.0, item.manifests.1
+                );
+                println!(
+                    "  partials    {:>4} {:>12} bytes",
+                    item.partials.0, item.partials.1
+                );
+                println!(
+                    "  orphans     {:>4} {:>12} bytes",
+                    item.orphans.0, item.orphans.1
+                );
+                println!("  total            {:>12} bytes", item.total);
             }
         }
         Commands::Restore {
@@ -450,7 +541,12 @@ fn run() -> Result<()> {
                     refuge::backup_queue::enqueue(&config, &path, &runtime_root)?;
                     Ok(None)
                 } else {
-                    refuge::backup::backup_path(&config, &path).map(Some)
+                    refuge::backup::backup_path(
+                        &config,
+                        &path,
+                        refuge::backup::BackupOptions::default(),
+                    )
+                    .map(Some)
                 }
             });
             match result {
@@ -463,45 +559,47 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn print_protected(manifest: &refuge::manifest::Manifest) {
-    let size = manifest
-        .artifact
-        .as_ref()
-        .map(|artifact| artifact.size)
-        .unwrap_or(0);
-    let ref_count = manifest
-        .refs
-        .len()
-        .saturating_sub(usize::from(manifest.head().is_some()));
-    match &manifest.lfs_artifact {
-        Some(lfs) => println!(
-            "protected {} {} refs {} bytes, {} LFS bytes",
-            manifest.snapshot_id, ref_count, size, lfs.size
-        ),
-        None => println!(
-            "protected {} {} refs {} bytes",
-            manifest.snapshot_id, ref_count, size
-        ),
-    }
-}
-
 fn print_backup_outcome(outcome: &refuge::backup::BackupOutcome) {
-    print_protected(&outcome.manifest);
-    for warning in &outcome.warnings {
-        eprintln!("refuge: warning: {warning}");
+    match outcome {
+        refuge::backup::BackupOutcome::AlreadyProtected { snapshot_id } => {
+            println!("already protected by {snapshot_id}")
+        }
+        refuge::backup::BackupOutcome::Published {
+            manifest,
+            kind,
+            git_bytes_written,
+            lfs_bytes_written,
+            warnings,
+            ..
+        } => {
+            let kind = match kind {
+                refuge::backup::SnapshotKind::Empty => "empty",
+                refuge::backup::SnapshotKind::Checkpoint => "checkpoint",
+                refuge::backup::SnapshotKind::Delta => "delta",
+                refuge::backup::SnapshotKind::RefsOnly => "refs only",
+            };
+            println!(
+                "protected {} {} refs ({kind}, {git_bytes_written} git bytes, {lfs_bytes_written} LFS bytes written)",
+                manifest.snapshot_id,
+                manifest.object_ref_count()
+            );
+            for warning in warnings {
+                eprintln!("refuge: warning: {warning}");
+            }
+        }
     }
 }
 
-fn protection_description(state: refuge::discovery::ProtectionState) -> String {
+fn protection_description(state: refuge::catalog::ProtectionState) -> String {
     match state {
-        refuge::discovery::ProtectionState::Protected { snapshot_id } => {
+        refuge::catalog::ProtectionState::Protected { snapshot_id } => {
             format!("Protected locally ({snapshot_id})\n  Cloud upload is not verified by Refuge")
         }
-        refuge::discovery::ProtectionState::Pending => {
+        refuge::catalog::ProtectionState::Pending => {
             "Pending (run `refuge repo backup`)".to_owned()
         }
-        refuge::discovery::ProtectionState::Unprotected => "Unprotected".to_owned(),
-        refuge::discovery::ProtectionState::Corrupt { reason } => {
+        refuge::catalog::ProtectionState::Unprotected => "Unprotected".to_owned(),
+        refuge::catalog::ProtectionState::Corrupt { reason } => {
             format!("Unprotected (corrupt: {reason})")
         }
     }

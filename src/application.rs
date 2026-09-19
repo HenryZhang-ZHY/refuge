@@ -80,7 +80,7 @@ fn provision(
     repository: Repository,
     config: &Config,
 ) -> Result<ProvisionedRepository, ProvisionError> {
-    match backup::backup_path(config, &repository.path) {
+    match backup::backup_path(config, &repository.path, backup::BackupOptions::default()) {
         Ok(backup) => Ok(ProvisionedRepository { repository, backup }),
         Err(source) => Err(ProvisionError::InitialBackup { repository, source }),
     }

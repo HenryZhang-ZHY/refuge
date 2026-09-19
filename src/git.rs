@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -113,12 +114,159 @@ pub fn ref_state(repo: &Path) -> Result<RefState> {
     Ok(RefState { refs, head })
 }
 
-pub fn bundle_create(repo: &Path, destination: &Path) -> Result<()> {
+pub const MAX_EXCLUSIONS: usize = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchCheck {
+    Found {
+        oid: String,
+        kind: String,
+        size: u64,
+    },
+    Missing,
+}
+
+fn stdin_file(
+    repo: &Path,
+    lines: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<tempfile::NamedTempFile> {
+    let staging = repo.parent().unwrap_or(repo).join(".refuge-staging");
+    std::fs::create_dir_all(&staging)?;
+    let mut file = tempfile::NamedTempFile::new_in(staging)?;
+    for line in lines {
+        writeln!(file, "{}", line.as_ref())?;
+    }
+    file.flush()?;
+    Ok(file)
+}
+
+pub fn batch_check(repo: &Path, names: &[String]) -> Result<Vec<BatchCheck>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = stdin_file(repo, names)?;
+    let output = command(Some(repo))
+        .args(["cat-file", "--batch-check"])
+        .stdin(Stdio::from(input.reopen()?))
+        .output()
+        .context("could not run git cat-file --batch-check")?;
+    if !output.status.success() {
+        return Err(output_error(&["cat-file", "--batch-check"], &output));
+    }
+    let stdout = String::from_utf8(output.stdout).context("git returned non-UTF-8 batch data")?;
+    let lines = stdout.lines().collect::<Vec<_>>();
+    if lines.len() != names.len() {
+        bail!("git cat-file returned the wrong number of batch results");
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            if line.ends_with(" missing") {
+                return Ok(BatchCheck::Missing);
+            }
+            let mut fields = line.split_whitespace();
+            let oid = fields
+                .next()
+                .context("malformed batch-check oid")?
+                .to_owned();
+            let kind = fields
+                .next()
+                .context("malformed batch-check kind")?
+                .to_owned();
+            let size = fields
+                .next()
+                .context("malformed batch-check size")?
+                .parse()
+                .context("invalid batch-check size")?;
+            if fields.next().is_some() {
+                bail!("malformed batch-check result");
+            }
+            Ok(BatchCheck::Found { oid, kind, size })
+        })
+        .collect()
+}
+
+pub fn batch_blob_contents(repo: &Path, oids: &[String]) -> Result<Vec<(String, Vec<u8>)>> {
+    if oids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = stdin_file(repo, oids)?;
+    let output = command(Some(repo))
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::from(input.reopen()?))
+        .output()
+        .context("could not run git cat-file --batch")?;
+    if !output.status.success() {
+        return Err(output_error(&["cat-file", "--batch"], &output));
+    }
+    let mut cursor = 0usize;
+    let mut results = Vec::with_capacity(oids.len());
+    for _ in oids {
+        let end = output.stdout[cursor..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .context("malformed batch header")?
+            + cursor;
+        let header =
+            std::str::from_utf8(&output.stdout[cursor..end]).context("non-UTF-8 batch header")?;
+        if header.ends_with(" missing") {
+            bail!("Git blob object is missing");
+        }
+        let fields = header.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 || fields[1] != "blob" {
+            bail!("Git object is not a blob");
+        }
+        let size: usize = fields[2].parse().context("invalid batch blob size")?;
+        cursor = end + 1;
+        let content_end = cursor
+            .checked_add(size)
+            .context("batch blob size overflow")?;
+        if content_end >= output.stdout.len() || output.stdout[content_end] != b'\n' {
+            bail!("truncated batch blob result");
+        }
+        results.push((
+            fields[0].to_owned(),
+            output.stdout[cursor..content_end].to_vec(),
+        ));
+        cursor = content_end + 1;
+    }
+    if cursor != output.stdout.len() {
+        bail!("unexpected trailing batch blob output");
+    }
+    Ok(results)
+}
+
+pub fn bundle_create(repo: &Path, destination: &Path, exclusions: &[String]) -> Result<()> {
+    if exclusions.len() > MAX_EXCLUSIONS {
+        bail!("too many bundle exclusions");
+    }
     let destination = destination
         .to_str()
         .context("bundle destination is not valid UTF-8")?;
-    run(Some(repo), &["bundle", "create", destination, "--all"])?;
+    let mut args = vec![
+        "bundle".to_owned(),
+        "create".to_owned(),
+        destination.to_owned(),
+        "--all".to_owned(),
+    ];
+    args.extend(exclusions.iter().map(|oid| format!("^{oid}")));
+    let references = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run(Some(repo), &references)?;
     Ok(())
+}
+
+pub fn has_objects_outside(repo: &Path, exclusions: &[String]) -> Result<bool> {
+    if exclusions.len() > MAX_EXCLUSIONS {
+        bail!("too many object exclusions");
+    }
+    let mut args = vec![
+        "rev-list".to_owned(),
+        "--objects".to_owned(),
+        "--all".to_owned(),
+    ];
+    args.extend(exclusions.iter().map(|oid| format!("^{oid}")));
+    let references = args.iter().map(String::as_str).collect::<Vec<_>>();
+    Ok(!run(Some(repo), &references)?.stdout.is_empty())
 }
 
 pub fn bundle_verify(repo: &Path, bundle: &Path) -> Result<()> {
@@ -141,6 +289,29 @@ pub fn bundle_list_heads(bundle: &Path) -> Result<BTreeMap<String, String>> {
         }
     }
     Ok(refs)
+}
+
+pub fn bundle_unbundle(repo: &Path, bundle: &Path) -> Result<()> {
+    bundle_verify(repo, bundle)?;
+    let bundle = bundle.to_str().context("bundle path is not valid UTF-8")?;
+    run(Some(repo), &["bundle", "unbundle", bundle])?;
+    Ok(())
+}
+
+pub fn create_refs(repo: &Path, refs: &BTreeMap<String, String>) -> Result<()> {
+    let lines = refs
+        .iter()
+        .map(|(name, oid)| format!("create {name} {oid}"));
+    let input = stdin_file(repo, lines)?;
+    let output = command(Some(repo))
+        .args(["update-ref", "--stdin"])
+        .stdin(Stdio::from(input.reopen()?))
+        .output()
+        .context("could not run git update-ref --stdin")?;
+    if !output.status.success() {
+        return Err(output_error(&["update-ref", "--stdin"], &output));
+    }
+    Ok(())
 }
 
 pub fn clone_mirror(source: &Path, destination: &Path) -> Result<()> {

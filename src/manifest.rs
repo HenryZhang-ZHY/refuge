@@ -1,16 +1,15 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
 use crate::git::RefState;
 
-const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+pub const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestIssue {
@@ -25,19 +24,21 @@ pub struct ManifestValidationError {
 }
 
 impl std::fmt::Display for ManifestValidationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
     }
 }
-
 impl std::error::Error for ManifestValidationError {}
 
-fn unsupported(message: impl Into<String>) -> anyhow::Error {
+fn issue(kind: ManifestIssue, message: impl Into<String>) -> anyhow::Error {
     ManifestValidationError {
-        issue: ManifestIssue::Unsupported,
+        issue: kind,
         message: message.into(),
     }
     .into()
+}
+fn corrupt(message: impl Into<String>) -> anyhow::Error {
+    issue(ManifestIssue::Corrupt, message)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,11 +53,22 @@ pub struct Artifact {
     pub key: String,
     pub size: u64,
     pub checksum: String,
-    pub format: String,
-    pub format_version: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSection {
+    pub parent: Option<String>,
+    pub bundle: Option<Artifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LfsSection {
+    pub set: Artifact,
+    pub count: u64,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     pub schema_version: u32,
     pub repo_id: Uuid,
@@ -65,16 +77,11 @@ pub struct Manifest {
     pub snapshot_id: String,
     pub created_at: String,
     pub generation: u64,
+    pub refuge_version: String,
     pub ref_state_hash: String,
     pub refs: BTreeMap<String, ManifestRef>,
-    pub artifact: Option<Artifact>,
-    /// Archive of the hosted repository's `lfs/objects` content store, if
-    /// the repository has any Git LFS objects. `git bundle` only captures
-    /// Git objects, never the LFS content store, so it is snapshotted and
-    /// verified separately.
-    pub lfs_artifact: Option<Artifact>,
-    pub encryption: Option<Value>,
-    pub refuge_version: String,
+    pub git: GitSection,
+    pub lfs: Option<LfsSection>,
 }
 
 impl Manifest {
@@ -86,7 +93,7 @@ impl Manifest {
             .collect::<BTreeMap<_, _>>();
         if let Some(head) = &state.head {
             refs.insert(
-                "HEAD".to_owned(),
+                "HEAD".into(),
                 ManifestRef::Symbolic {
                     symref: head.clone(),
                 },
@@ -94,46 +101,34 @@ impl Manifest {
         }
         refs
     }
-
     pub fn head(&self) -> Option<&str> {
         match self.refs.get("HEAD") {
             Some(ManifestRef::Symbolic { symref }) => Some(symref),
             _ => None,
         }
     }
-
     pub fn ref_state(&self) -> RefState {
-        let refs = self
-            .refs
-            .iter()
-            .filter_map(|(name, value)| match value {
-                ManifestRef::Object(oid) => Some((name.clone(), oid.clone())),
-                ManifestRef::Symbolic { .. } => None,
-            })
-            .collect();
         RefState {
-            refs,
+            refs: self
+                .refs
+                .iter()
+                .filter_map(|(name, value)| match value {
+                    ManifestRef::Object(oid) => Some((name.clone(), oid.clone())),
+                    ManifestRef::Symbolic { .. } => None,
+                })
+                .collect(),
             head: self.head().map(str::to_owned),
         }
     }
+    pub fn object_ref_count(&self) -> usize {
+        self.refs
+            .values()
+            .filter(|value| matches!(value, ManifestRef::Object(_)))
+            .count()
+    }
 }
 
-pub fn paths_in(snapshots: &Path) -> Result<Vec<PathBuf>> {
-    if !snapshots.exists() {
-        return Ok(Vec::new());
-    }
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(snapshots)? {
-        let path = entry?.path();
-        if path.to_string_lossy().ends_with(".manifest.json") {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    Ok(paths)
-}
-
-pub fn read(path: &Path) -> Result<Manifest> {
+pub fn read(path: &Path) -> anyhow::Result<Manifest> {
     let file =
         File::open(path).with_context(|| format!("could not open manifest {}", path.display()))?;
     let mut bytes = Vec::new();
@@ -141,11 +136,11 @@ pub fn read(path: &Path) -> Result<Manifest> {
         .read_to_end(&mut bytes)
         .with_context(|| format!("could not read manifest {}", path.display()))?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        bail!(
+        return Err(corrupt(format!(
             "manifest {} exceeds the {} byte limit",
             path.display(),
             MAX_MANIFEST_BYTES
-        );
+        )));
     }
     let manifest: Manifest = serde_json::from_slice(&bytes)
         .with_context(|| format!("invalid manifest {}", path.display()))?;
@@ -153,107 +148,95 @@ pub fn read(path: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
-pub fn validate(path: &Path, manifest: &Manifest) -> Result<()> {
-    if manifest.schema_version != 1 {
-        return Err(unsupported(format!(
-            "unsupported manifest schema version {}",
-            manifest.schema_version
-        )));
+pub fn validate(path: &Path, manifest: &Manifest) -> anyhow::Result<()> {
+    if manifest.schema_version != 2 {
+        return Err(issue(
+            ManifestIssue::Unsupported,
+            format!(
+                "unsupported manifest schema version {}",
+                manifest.schema_version
+            ),
+        ));
     }
-    if manifest.encryption.is_some() {
-        return Err(unsupported("unsupported manifest encryption"));
+    if !valid_snapshot_id(&manifest.snapshot_id) {
+        return Err(corrupt(
+            "manifest snapshot id contains invalid path characters",
+        ));
+    }
+    if path.file_name().and_then(|name| name.to_str())
+        != Some(format!("{}.json", manifest.snapshot_id).as_str())
+    {
+        return Err(corrupt("manifest snapshot id differs from its filename"));
     }
     if manifest.generation == 0 {
-        bail!("manifest generation must be at least one");
+        return Err(corrupt("manifest generation must be at least one"));
     }
-    if manifest.snapshot_id.is_empty()
-        || !manifest
-            .snapshot_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        bail!("manifest snapshot id contains invalid path characters");
-    }
-    let expected_file = format!("{}.manifest.json", manifest.snapshot_id);
-    if path.file_name().and_then(|name| name.to_str()) != Some(expected_file.as_str()) {
-        bail!("manifest snapshot id differs from its filename");
-    }
-
     validate_refs(manifest)?;
-    match &manifest.artifact {
-        Some(artifact) => validate_artifact(
-            artifact,
-            &format!("snapshots/{}.bundle", manifest.snapshot_id),
-            "git-bundle",
-            2,
-        )?,
-        None if manifest
-            .refs
-            .iter()
-            .any(|(name, value)| name != "HEAD" || matches!(value, ManifestRef::Object(_))) =>
-        {
-            bail!("non-empty snapshot has no Git bundle artifact");
-        }
-        None => {}
+    if let Some(parent) = &manifest.git.parent
+        && (!valid_snapshot_id(parent) || parent == &manifest.snapshot_id)
+    {
+        return Err(corrupt("manifest has an invalid Git parent"));
     }
-    if let Some(artifact) = &manifest.lfs_artifact {
-        validate_artifact(
-            artifact,
-            &format!("snapshots/{}.lfs.tar", manifest.snapshot_id),
-            "lfs-archive",
-            1,
-        )?;
+    if let Some(bundle) = &manifest.git.bundle {
+        if bundle.key != crate::layout::RepoLayout::bundle_key(&manifest.snapshot_id) {
+            return Err(corrupt("bundle key does not match the snapshot layout"));
+        }
+        checksum_digest(&bundle.checksum)?;
+    }
+    let has_objects = manifest.object_ref_count() != 0;
+    if manifest.git.parent.is_none() && has_objects && manifest.git.bundle.is_none() {
+        return Err(corrupt("non-empty checkpoint has no Git bundle"));
+    }
+    if !has_objects && (manifest.git.bundle.is_some() || manifest.lfs.is_some()) {
+        return Err(corrupt("empty snapshot contains an artifact"));
+    }
+    if let Some(lfs) = &manifest.lfs {
+        if lfs.count == 0 {
+            return Err(corrupt("LFS section has an empty set"));
+        }
+        let digest = checksum_digest(&lfs.set.checksum)?;
+        if lfs.set.key != crate::layout::RepoLayout::lfs_set_key(digest) {
+            return Err(corrupt("LFS set key does not match its checksum"));
+        }
     }
     Ok(())
 }
 
-fn validate_refs(manifest: &Manifest) -> Result<()> {
+fn validate_refs(manifest: &Manifest) -> anyhow::Result<()> {
     let mut refs = BTreeMap::new();
     let mut head = None;
     for (name, value) in &manifest.refs {
         match (name.as_str(), value) {
             ("HEAD", ManifestRef::Symbolic { symref }) if valid_ref_name(symref) => {
-                head = Some(symref.clone());
+                head = Some(symref.clone())
             }
-            ("HEAD", _) => bail!("manifest HEAD must be a valid symbolic ref"),
+            ("HEAD", _) => return Err(corrupt("manifest HEAD must be a valid symbolic ref")),
             (_, ManifestRef::Object(oid)) if valid_ref_name(name) && valid_oid(oid) => {
                 refs.insert(name.clone(), oid.clone());
             }
             (_, ManifestRef::Symbolic { .. }) => {
-                bail!("only manifest HEAD may be symbolic")
+                return Err(corrupt("only manifest HEAD may be symbolic"));
             }
-            _ => bail!("manifest contains an invalid ref name or object id"),
+            _ => {
+                return Err(corrupt(
+                    "manifest contains an invalid ref name or object id",
+                ));
+            }
         }
     }
-    let actual = RefState { refs, head }.hash();
-    if actual != manifest.ref_state_hash {
-        bail!("manifest refs do not match ref_state_hash");
+    if (RefState { refs, head }).hash() != manifest.ref_state_hash {
+        return Err(corrupt("manifest refs do not match ref_state_hash"));
     }
     Ok(())
 }
 
-fn validate_artifact(
-    artifact: &Artifact,
-    expected_key: &str,
-    expected_format: &str,
-    expected_version: u32,
-) -> Result<()> {
-    if artifact.key != expected_key {
-        bail!("artifact key does not match the snapshot layout");
-    }
-    if artifact.format != expected_format || artifact.format_version != expected_version {
-        return Err(unsupported(format!(
-            "unsupported artifact format {} version {}",
-            artifact.format, artifact.format_version
-        )));
-    }
-    if !valid_checksum(&artifact.checksum) {
-        bail!("artifact checksum is not a SHA-256 digest");
-    }
-    Ok(())
+pub fn valid_snapshot_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
-
-fn valid_ref_name(name: &str) -> bool {
+pub fn valid_ref_name(name: &str) -> bool {
     name.starts_with("refs/")
         && !name.contains("..")
         && !name.contains(['\\', ':'])
@@ -261,123 +244,85 @@ fn valid_ref_name(name: &str) -> bool {
             .bytes()
             .any(|byte| byte.is_ascii_control() || byte == b' ')
 }
-
-fn valid_oid(oid: &str) -> bool {
+pub fn valid_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
-
-fn valid_checksum(checksum: &str) -> bool {
-    checksum.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
+pub fn checksum_digest(checksum: &str) -> Result<&str> {
+    checksum
+        .strip_prefix("sha256:")
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+        .ok_or_else(|| corrupt("artifact checksum is not a lowercase SHA-256 digest"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn valid_manifest() -> Manifest {
         let state = RefState {
             refs: BTreeMap::from([(
-                "refs/heads/main".to_owned(),
-                "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                "refs/heads/main".into(),
+                "0123456789abcdef0123456789abcdef01234567".into(),
             )]),
-            head: Some("refs/heads/main".to_owned()),
+            head: Some("refs/heads/main".into()),
         };
+        let snapshot_id = "20260919T103000Z-g42-a1b2c3d4".to_owned();
         Manifest {
-            schema_version: 1,
+            schema_version: 2,
             repo_id: Uuid::nil(),
-            repo_name: "notes".to_owned(),
+            repo_name: "notes".into(),
             instance_id: Uuid::nil(),
-            snapshot_id: "20260918T091530Z-g1-00000000".to_owned(),
-            created_at: "2026-09-18T09:15:30Z".to_owned(),
-            generation: 1,
+            snapshot_id: snapshot_id.clone(),
+            created_at: "2026-09-19T10:30:00Z".into(),
+            generation: 42,
+            refuge_version: "1.0.0".into(),
             ref_state_hash: state.hash(),
             refs: Manifest::refs_from(&state),
-            artifact: Some(Artifact {
-                key: "snapshots/20260918T091530Z-g1-00000000.bundle".to_owned(),
-                size: 42,
-                checksum: format!("sha256:{}", "a".repeat(64)),
-                format: "git-bundle".to_owned(),
-                format_version: 2,
-            }),
-            lfs_artifact: None,
-            encryption: None,
-            refuge_version: "0.1.0".to_owned(),
+            git: GitSection {
+                parent: None,
+                bundle: Some(Artifact {
+                    key: crate::layout::RepoLayout::bundle_key(&snapshot_id),
+                    size: 42,
+                    checksum: format!("sha256:{}", "a".repeat(64)),
+                }),
+            },
+            lfs: None,
         }
     }
-
-    fn path() -> PathBuf {
-        PathBuf::from("20260918T091530Z-g1-00000000.manifest.json")
+    fn path() -> std::path::PathBuf {
+        "20260919T103000Z-g42-a1b2c3d4.json".into()
     }
-
     #[test]
-    fn validates_manifest_semantics() {
-        validate(&path(), &valid_manifest()).unwrap();
-    }
-
-    #[test]
-    fn rejects_unsupported_schema_and_encryption() {
-        let mut manifest = valid_manifest();
-        manifest.schema_version = 2;
-        assert!(
-            validate(&path(), &manifest)
-                .unwrap_err()
-                .to_string()
-                .contains("schema")
-        );
-
-        let mut manifest = valid_manifest();
-        manifest.encryption = Some(serde_json::json!({"scheme": "future"}));
-        assert!(
-            validate(&path(), &manifest)
-                .unwrap_err()
-                .to_string()
-                .contains("encryption")
-        );
-    }
-
-    #[test]
-    fn rejects_mismatched_filename_refs_hash_and_artifact_layout() {
+    fn round_trips_and_validates_v2() {
         let manifest = valid_manifest();
-        assert!(validate(Path::new("other.manifest.json"), &manifest).is_err());
-
-        let mut manifest = valid_manifest();
-        manifest.ref_state_hash = format!("sha256:{}", "0".repeat(64));
-        assert!(
-            validate(&path(), &manifest)
-                .unwrap_err()
-                .to_string()
-                .contains("ref_state_hash")
+        validate(&path(), &manifest).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Manifest>(&serde_json::to_vec(&manifest).unwrap()).unwrap(),
+            manifest
         );
-
-        for key in [
-            "/absolute.bundle",
-            "snapshots/../escape.bundle",
-            "snapshots\\escape.bundle",
-            "C:\\escape.bundle",
-        ] {
-            let mut manifest = valid_manifest();
-            manifest.artifact.as_mut().unwrap().key = key.to_owned();
-            assert!(validate(&path(), &manifest).is_err(), "accepted {key}");
+    }
+    #[test]
+    fn rejects_structural_invariants() {
+        let mut values = Vec::new();
+        let mut value = valid_manifest();
+        value.schema_version = 1;
+        values.push(value);
+        let mut value = valid_manifest();
+        value.generation = 0;
+        values.push(value);
+        let mut value = valid_manifest();
+        value.git.parent = Some(value.snapshot_id.clone());
+        values.push(value);
+        let mut value = valid_manifest();
+        value.git.bundle = None;
+        values.push(value);
+        for value in values {
+            assert!(validate(&path(), &value).is_err());
         }
-    }
-
-    #[test]
-    fn old_manifest_without_lfs_artifact_remains_readable() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(path());
-        let mut value = serde_json::to_value(valid_manifest()).unwrap();
-        value.as_object_mut().unwrap().remove("lfs_artifact");
-        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(read(&path).unwrap().lfs_artifact.is_none());
-    }
-
-    #[test]
-    fn bounds_manifest_input_size() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("large.manifest.json");
-        std::fs::write(&path, vec![b' '; MAX_MANIFEST_BYTES as usize + 1]).unwrap();
-        assert!(read(&path).unwrap_err().to_string().contains("exceeds"));
+        assert!(validate(Path::new("wrong.json"), &valid_manifest()).is_err());
     }
 }

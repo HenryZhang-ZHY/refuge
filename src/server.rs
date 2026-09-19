@@ -24,8 +24,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
 
+use crate::catalog::ProtectionState;
 use crate::config::Config;
-use crate::discovery::ProtectionState;
 
 pub struct ServeOptions {
     pub runtime_root: PathBuf,
@@ -368,20 +368,26 @@ fn restore_runtime_if_empty(config: &Config) -> Result<()> {
     if std::fs::read_dir(&config.repos_dir)?.next().is_some() {
         return Ok(());
     }
-    let catalog = crate::discovery::list_snapshots(&config.target_root, None)
+    let catalogs = crate::catalog::list_targets(&config.target_root, None)
         .context("could not inspect the backup directory")?;
-    let mut repositories = catalog
-        .snapshots
+    let repositories = catalogs
         .iter()
-        .map(|snapshot| snapshot.manifest.repo_id)
+        .filter(|(_, catalog)| catalog.newest().is_some())
+        .map(|(id, _)| *id)
         .collect::<Vec<_>>();
-    repositories.sort_unstable();
-    repositories.dedup();
-
-    if repositories.is_empty() && !catalog.diagnostics.is_empty() {
+    if repositories.is_empty()
+        && catalogs
+            .iter()
+            .any(|(_, catalog)| !catalog.diagnostics().is_empty())
+    {
         bail!(
             "the backup directory contains no readable repository snapshots: {}",
-            catalog.diagnostics[0].reason
+            catalogs
+                .iter()
+                .flat_map(|(_, catalog)| catalog.diagnostics())
+                .next()
+                .unwrap()
+                .reason
         );
     }
     for repository_id in repositories {
@@ -700,7 +706,7 @@ async fn lfs_upload(
 
     let staged_for_check = staged.clone();
     let (checksum, _) =
-        tokio::task::spawn_blocking(move || crate::storage::checksum(&staged_for_check))
+        tokio::task::spawn_blocking(move || crate::store::sha256_file(&staged_for_check))
             .await
             .map_err(|error| ApiError::internal(format!("LFS checksum task failed: {error}")))?
             .map_err(ApiError::internal)?;
@@ -782,7 +788,7 @@ fn lfs_object_path(repository: &Path, oid: &str) -> PathBuf {
 }
 
 fn valid_existing_lfs_object(path: &Path, oid: &str, expected_size: u64) -> bool {
-    let Ok((checksum, size)) = crate::storage::checksum(path) else {
+    let Ok((checksum, size)) = crate::store::sha256_file(path) else {
         return false;
     };
     size == expected_size && checksum == format!("sha256:{oid}")
@@ -966,7 +972,7 @@ fn api_repository(
     repository: crate::repo::HostedRepository,
 ) -> Result<ApiRepository, ApiError> {
     let state =
-        crate::discovery::repository_status(config, &repository).map_err(ApiError::internal)?;
+        crate::catalog::repository_status(config, &repository).map_err(ApiError::internal)?;
     let (protection, snapshot_id) = match state {
         ProtectionState::Protected { snapshot_id } => ("protected", Some(snapshot_id)),
         ProtectionState::Pending => ("pending", None),

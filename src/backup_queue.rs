@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use uuid::Uuid;
 
+use crate::catalog::ProtectionState;
 use crate::config::Config;
-use crate::discovery::ProtectionState;
 use crate::{backup, git, repo};
 
 pub fn enqueue(config: &Config, repository: &Path, store_root: &Path) -> Result<()> {
@@ -18,7 +18,7 @@ pub fn enqueue(config: &Config, repository: &Path, store_root: &Path) -> Result<
 pub fn reconcile(config: &Config, store_root: &Path) -> Result<()> {
     for repository in repo::list(config)? {
         if !matches!(
-            crate::discovery::repository_status(config, &repository)?,
+            crate::catalog::repository_status(config, &repository)?,
             ProtectionState::Protected { .. }
         ) {
             enqueue_id(config, repository.id, store_root)?;
@@ -72,7 +72,7 @@ fn process_job(config: &Config, marker: &Path) -> Result<()> {
         std::fs::read(marker).with_context(|| format!("could not read {}", marker.display()))?
     };
     let repository = repo::resolve(config, &id.to_string())?;
-    backup::backup_path(config, &repository.path)?;
+    backup::backup_path(config, &repository.path, backup::BackupOptions::default())?;
 
     let _lock = lock_job(queue, id)?;
     if std::fs::read(marker).ok().as_deref() == Some(token.as_slice()) {

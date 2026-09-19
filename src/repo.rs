@@ -221,15 +221,19 @@ pub fn ensure_identity_available(config: &Config, id: Uuid, destination: &Path) 
 }
 
 pub(crate) fn lock_name(config: &Config, name: &str) -> Result<std::fs::File> {
+    let directory = crate::layout::locks_dir(config);
+    std::fs::create_dir_all(&directory)?;
     lock_file(
-        &config.repos_dir.join(format!(".refuge-name-{name}.lock")),
+        &directory.join(format!("name-{name}.lock")),
         "repository name",
     )
 }
 
 pub(crate) fn lock_identity(config: &Config, id: Uuid) -> Result<std::fs::File> {
+    let directory = crate::layout::locks_dir(config);
+    std::fs::create_dir_all(&directory)?;
     lock_file(
-        &config.repos_dir.join(format!(".refuge-identity-{id}.lock")),
+        &directory.join(format!("identity-{id}.lock")),
         "repository identity",
     )
 }
@@ -320,10 +324,9 @@ mod tests {
 
         assert!(error.to_string().contains("injected"));
         assert!(!config.repos_dir.join("broken.git").exists());
-        assert!(
-            std::fs::read_dir(&config.repos_dir)
-                .unwrap()
-                .all(|entry| entry.unwrap().path().is_file())
-        );
+        assert!(std::fs::read_dir(&config.repos_dir).unwrap().all(|entry| {
+            let path = entry.unwrap().path();
+            path.is_file() || path.file_name().is_some_and(|name| name == ".refuge-locks")
+        }));
     }
 }

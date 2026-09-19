@@ -1,12 +1,14 @@
 pub mod application;
 pub mod backup;
 pub mod backup_queue;
+pub mod catalog;
 pub mod config;
-pub mod discovery;
 pub mod git;
+pub mod layout;
 pub mod lfs;
 pub mod manifest;
 pub mod repo;
 pub mod restore;
 pub mod server;
-pub mod storage;
+pub mod store;
+pub mod verify;
