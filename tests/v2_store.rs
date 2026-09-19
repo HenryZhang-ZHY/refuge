@@ -138,6 +138,6 @@ fn deep_verify_detects_same_size_bundle_corruption() {
     env.refuge()
         .args(["snapshots", "verify", "deep"])
         .assert()
-        .failure()
-        .stderr(contains("checksum differs from manifest"));
+        .code(1)
+        .stdout(contains("checksum differs from manifest"));
 }

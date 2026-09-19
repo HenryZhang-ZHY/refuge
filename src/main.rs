@@ -448,8 +448,14 @@ fn run() -> Result<()> {
         } => {
             let config = refuge::config::Config::load()?;
             let target = target.as_deref().unwrap_or(&config.target_root);
-            let id = refuge::verify::verify(&config, &selector, snapshot.as_deref(), target)?;
-            println!("verified {id}");
+            match refuge::verify::verify(&config, &selector, snapshot.as_deref(), target) {
+                Ok(id) => println!("verified {id}"),
+                Err(error) if error.to_string().starts_with("invalid ") => {
+                    println!("{error:#}");
+                    process::exit(1);
+                }
+                Err(error) => return Err(error),
+            }
         }
         Commands::Snapshots {
             command: SnapshotCommands::Usage { selector, target },
