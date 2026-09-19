@@ -30,6 +30,7 @@ struct LfsWorld {
     clean_repos: Option<PathBuf>,
     restored: Option<PathBuf>,
     backup_output: Option<Output>,
+    lfs_inventory_before: Vec<(PathBuf, u64)>,
 }
 
 impl LfsWorld {
@@ -55,6 +56,7 @@ impl LfsWorld {
             clean_repos: None,
             restored: None,
             backup_output: None,
+            lfs_inventory_before: Vec::new(),
         }
     }
 
@@ -145,6 +147,29 @@ impl LfsWorld {
             })
             .collect()
     }
+}
+
+fn file_inventory(root: &Path) -> Vec<(PathBuf, u64)> {
+    fn visit(root: &Path, directory: &Path, files: &mut Vec<(PathBuf, u64)>) {
+        for entry in std::fs::read_dir(directory).expect("inventory directory") {
+            let entry = entry.expect("inventory entry");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else if path.is_file() {
+                files.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    entry.metadata().unwrap().len(),
+                ));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    if root.is_dir() {
+        visit(root, root, &mut files);
+    }
+    files.sort();
+    files
 }
 
 /// PATH value with the built `refuge` binary's directory prepended, so the
@@ -301,7 +326,7 @@ fn retry_protects_git_and_lfs(world: &mut LfsWorld) {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("LFS bytes"));
-    verified_lfs_archive_appears(world);
+    verified_lfs_objects_and_set_appear(world);
     status_says_protected_locally(world);
 }
 
@@ -337,8 +362,8 @@ fn status_says_protected_locally(world: &mut LfsWorld) {
     assert!(status.contains("Protected locally"));
 }
 
-#[then("a verified LFS archive appears in the OneDrive sync folder")]
-fn verified_lfs_archive_appears(world: &mut LfsWorld) {
+#[then("verified LFS objects and a set appear in the OneDrive sync folder")]
+fn verified_lfs_objects_and_set_appear(world: &mut LfsWorld) {
     let manifests = world.manifests();
     let manifest = manifests.last().expect("at least one snapshot");
     let artifact = manifest
@@ -358,6 +383,55 @@ fn verified_lfs_archive_appears(world: &mut LfsWorld) {
     digest.update(&bytes);
     let checksum = format!("sha256:{:x}", digest.finalize());
     assert_eq!(checksum, artifact.checksum);
+}
+
+#[given("the repository already has a protected LFS asset")]
+fn repository_has_protected_lfs_asset(world: &mut LfsWorld) {
+    commit_large_binary_and_push(world);
+    push_succeeds(world);
+    verified_lfs_objects_and_set_appear(world);
+    world.lfs_inventory_before = file_inventory(
+        &world
+            .target
+            .join("refuge/v2/repos")
+            .join(world.repo_id())
+            .join("lfs"),
+    );
+}
+
+#[when("the user commits and pushes a Git-only change")]
+fn commits_git_only_change(world: &mut LfsWorld) {
+    let work = world.work().to_path_buf();
+    std::fs::write(work.join("README.md"), "Git-only change\n").unwrap();
+    git_stdout(&work, &["add", "README.md"], None);
+    git_stdout(&work, &["commit", "-m", "Git-only change"], None);
+    world.push_output = Some(git_output(
+        &work,
+        &["push", "refuge", "main"],
+        Some(&world.config),
+    ));
+}
+
+#[then("the push reports zero LFS bytes written")]
+fn push_reports_zero_lfs_bytes(world: &mut LfsWorld) {
+    push_succeeds(world);
+    let stderr = String::from_utf8_lossy(&world.push_output.as_ref().unwrap().stderr);
+    assert!(
+        stderr.contains("0 LFS bytes written"),
+        "push stderr: {stderr}"
+    );
+}
+
+#[then("no new LFS object or set file is published")]
+fn no_new_lfs_file(world: &mut LfsWorld) {
+    let current = file_inventory(
+        &world
+            .target
+            .join("refuge/v2/repos")
+            .join(world.repo_id())
+            .join("lfs"),
+    );
+    assert_eq!(current, world.lfs_inventory_before);
 }
 
 #[when(expr = "a clean Refuge installation restores the {string} repository")]

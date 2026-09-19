@@ -39,3 +39,7 @@ harness = false
 [[test]]
 name = "bdd_lfs"
 harness = false
+
+[[test]]
+name = "bdd_v2_store"
+harness = false

@@ -6,6 +6,7 @@ use std::process::{Command as ProcessCommand, Output};
 
 use assert_cmd::Command;
 
+#[derive(Debug)]
 pub struct TestEnvironment {
     temp: tempfile::TempDir,
     pub config: PathBuf,

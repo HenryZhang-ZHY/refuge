@@ -11,7 +11,7 @@ Feature: Git LFS objects survive backup and restore
     Then the push succeeds without a separate backup command
     And the push output reports LFS bytes protected locally
     And status says the repository is protected locally
-    And a verified LFS archive appears in the OneDrive sync folder
+    And verified LFS objects and a set appear in the OneDrive sync folder
     When a clean Refuge installation restores the "vault" repository
     Then the restored repository's Git LFS objects match the original content
 
@@ -24,3 +24,12 @@ Feature: Git LFS objects survive backup and restore
     And status says the repository has pending unprotected changes
     When the user uploads the missing LFS object and retries backup
     Then the retry protects the Git history and LFS content
+
+  @LFS03
+  Scenario: A Git-only push reuses the complete LFS set
+    Given the "vault" working copy uses the Refuge repository as a remote
+    And the working copy tracks "*.bin" files with Git LFS
+    And the repository already has a protected LFS asset
+    When the user commits and pushes a Git-only change
+    Then the push reports zero LFS bytes written
+    And no new LFS object or set file is published
