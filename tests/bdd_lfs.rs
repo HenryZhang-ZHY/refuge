@@ -30,6 +30,7 @@ struct LfsWorld {
     clean_repos: Option<PathBuf>,
     restored: Option<PathBuf>,
     backup_output: Option<Output>,
+    import_output: Option<Output>,
     lfs_inventory_before: Vec<(PathBuf, u64)>,
 }
 
@@ -56,6 +57,7 @@ impl LfsWorld {
             clean_repos: None,
             restored: None,
             backup_output: None,
+            import_output: None,
             lfs_inventory_before: Vec::new(),
         }
     }
@@ -98,6 +100,15 @@ impl LfsWorld {
     fn prepare_working_copy(&mut self, name: &str) {
         self.initialize();
         self.create_repository(name);
+        self.prepare_source_worktree();
+        git_stdout(
+            self.work(),
+            &["remote", "add", "refuge", self.hosted().to_str().unwrap()],
+            None,
+        );
+    }
+
+    fn prepare_source_worktree(&mut self) {
         let work = self.temp.path().join("working-copy");
         std::fs::create_dir(&work).expect("working copy directory");
         git_stdout(&work, &["init", "--initial-branch=main"], None);
@@ -105,11 +116,6 @@ impl LfsWorld {
         git_stdout(
             &work,
             &["config", "user.email", "user@example.invalid"],
-            None,
-        );
-        git_stdout(
-            &work,
-            &["remote", "add", "refuge", self.hosted().to_str().unwrap()],
             None,
         );
         self.work = Some(work);
@@ -231,6 +237,12 @@ fn working_copy_uses_refuge(world: &mut LfsWorld, name: String) {
     world.prepare_working_copy(&name);
 }
 
+#[given(expr = "the {string} working copy is ready for import")]
+fn working_copy_is_ready_for_import(world: &mut LfsWorld, _name: String) {
+    world.initialize();
+    world.prepare_source_worktree();
+}
+
 #[given(expr = "the working copy tracks {string} files with Git LFS")]
 fn tracks_pattern_with_lfs(world: &mut LfsWorld, pattern: String) {
     let work = world.work().to_path_buf();
@@ -242,6 +254,116 @@ fn tracks_pattern_with_lfs(world: &mut LfsWorld, pattern: String) {
         &["commit", "-m", "track large files with Git LFS"],
         None,
     );
+}
+
+#[given("the working copy uses custom Git LFS storage")]
+fn working_copy_uses_custom_lfs_storage(world: &mut LfsWorld) {
+    let storage = world.temp.path().join("source-lfs-storage");
+    git_stdout(
+        world.work(),
+        &["config", "lfs.storage", storage.to_str().unwrap()],
+        None,
+    );
+}
+
+fn commit_import_asset(world: &mut LfsWorld, content: Vec<u8>, message: &str) {
+    let work = world.work().to_path_buf();
+    std::fs::write(work.join("asset.bin"), &content).expect("write import asset");
+    world.binary_content = content;
+    git_stdout(&work, &["add", "asset.bin"], None);
+    git_stdout(&work, &["commit", "-m", message], None);
+}
+
+#[given("the user commits two versions of an LFS asset")]
+fn commits_two_import_asset_versions(world: &mut LfsWorld) {
+    commit_import_asset(world, vec![b'A'; 1_000_000], "first LFS version");
+    commit_import_asset(world, vec![b'B'; 1_000_000], "second LFS version");
+}
+
+#[given("the user commits one LFS asset but removes its local object")]
+fn commits_import_asset_without_object(world: &mut LfsWorld) {
+    commit_import_asset(world, vec![b'C'; 1_000_000], "missing LFS asset");
+    let (oid, _) = refuge::lfs::required_set(world.work())
+        .expect("source LFS pointers")
+        .into_iter()
+        .next()
+        .expect("committed LFS asset");
+    let media = git_stdout(world.work(), &["lfs", "env"], None)
+        .lines()
+        .find_map(|line| line.strip_prefix("LocalMediaDir="))
+        .map(PathBuf::from)
+        .expect("Git LFS local media directory");
+    std::fs::remove_file(media.join(&oid[..2]).join(&oid[2..4]).join(oid))
+        .expect("remove test LFS object");
+}
+
+#[when(expr = "the user imports the working copy as {string} and connects it")]
+fn imports_working_copy(world: &mut LfsWorld, name: String) {
+    let work = world.work().to_path_buf();
+    world.import_output = Some(
+        world
+            .command()
+            .current_dir(work)
+            .args(["repo", "import", &name, "--connect"])
+            .output()
+            .expect("run import"),
+    );
+}
+
+#[then("the import protects both LFS versions and connects the remote")]
+fn import_protects_lfs_versions(world: &mut LfsWorld) {
+    let output = world.import_output.as_ref().expect("import result");
+    assert!(
+        output.status.success(),
+        "import failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let hosted = world.repos.join("vault.git");
+    world.repo_id = Some(git_stdout(&hosted, &["config", "refuge.repoid"], None));
+    world.hosted = Some(hosted);
+    assert_eq!(
+        git_stdout(world.work(), &["remote", "get-url", "refuge"], None),
+        world.hosted().to_str().unwrap()
+    );
+    let set = refuge::lfs::required_set(world.hosted()).expect("imported LFS pointers");
+    assert_eq!(set.len(), 2);
+    let media = git_stdout(world.work(), &["lfs", "env"], None)
+        .lines()
+        .find_map(|line| line.strip_prefix("LocalMediaDir="))
+        .map(PathBuf::from)
+        .expect("Git LFS local media directory");
+    for (oid, size) in set {
+        let relative = Path::new(&oid[..2]).join(&oid[2..4]).join(&oid);
+        let bytes = std::fs::read(refuge::lfs::local_object_path(world.hosted(), &oid))
+            .expect("imported LFS object");
+        assert_eq!(bytes.len() as u64, size);
+        assert_eq!(bytes, std::fs::read(media.join(relative)).unwrap());
+    }
+    assert_eq!(
+        world
+            .manifests()
+            .last()
+            .unwrap()
+            .lfs
+            .as_ref()
+            .unwrap()
+            .count,
+        2
+    );
+    verified_lfs_objects_and_set_appear(world);
+}
+
+#[then("the import fails before publishing the hosted repository")]
+fn import_fails_before_publishing(world: &mut LfsWorld) {
+    let output = world.import_output.as_ref().expect("import result");
+    assert!(!output.status.success(), "import unexpectedly succeeded");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("required source LFS object"),
+        "import stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!world.repos.join("vault.git").exists());
+    assert!(git_stdout(world.work(), &["remote"], None).is_empty());
 }
 
 #[when("the user commits a large binary file and pushes the main branch")]

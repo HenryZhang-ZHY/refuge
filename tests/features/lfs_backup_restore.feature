@@ -33,3 +33,23 @@ Feature: Git LFS objects survive backup and restore
     When the user commits and pushes a Git-only change
     Then the push reports zero LFS bytes written
     And no new LFS object or set file is published
+
+  @LFS04
+  Scenario: Importing an LFS repository protects current and historical objects
+    Given the "vault" working copy is ready for import
+    And the working copy tracks "*.bin" files with Git LFS
+    And the working copy uses custom Git LFS storage
+    And the user commits two versions of an LFS asset
+    When the user imports the working copy as "vault" and connects it
+    Then the import protects both LFS versions and connects the remote
+    And status says the repository is protected locally
+    When a clean Refuge installation restores the "vault" repository
+    Then the restored repository's Git LFS objects match the original content
+
+  @LFS05
+  Scenario: An import with missing source LFS content leaves no hosted repository
+    Given the "vault" working copy is ready for import
+    And the working copy tracks "*.bin" files with Git LFS
+    And the user commits one LFS asset but removes its local object
+    When the user imports the working copy as "vault" and connects it
+    Then the import fails before publishing the hosted repository
