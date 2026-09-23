@@ -143,6 +143,10 @@ cd D:\work\notes
 refuge repo import notes --connect
 ```
 
+If the imported repository uses Git LFS, its required local LFS objects are
+copied into the hosted repository before the initial backup. Fetch missing
+objects in the source (for example, with `git lfs fetch --all`) before importing.
+
 ### 3. Push to back it up
 
 ```powershell

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
-use crate::{config::Config, git};
+use crate::{config::Config, git, lfs};
 
 #[derive(Debug)]
 pub struct Repository {
@@ -23,7 +23,10 @@ pub fn create(config: &Config, name: &str) -> Result<Repository> {
 }
 
 pub fn import(config: &Config, name: &str, source: &Path) -> Result<Repository> {
-    create_staged(config, name, |path| git::clone_mirror(source, path))
+    create_staged(config, name, |path| {
+        git::clone_mirror(source, path)?;
+        lfs::import_objects(source, path)
+    })
 }
 
 fn create_staged(

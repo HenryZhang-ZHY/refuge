@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -121,6 +122,35 @@ pub fn local_object_path(repo: &Path, oid: &str) -> PathBuf {
         .join(&oid[..2])
         .join(&oid[2..4])
         .join(oid)
+}
+
+pub fn import_objects(source: &Path, destination: &Path) -> Result<()> {
+    let required = required_set(destination)?;
+    if required.is_empty() {
+        return Ok(());
+    }
+    let source_dir = git::lfs_media_dir(source)?;
+    for (oid, size) in required {
+        let source_path = source_dir.join(&oid[..2]).join(&oid[2..4]).join(&oid);
+        let metadata = fs::symlink_metadata(&source_path)
+            .with_context(|| format!("required source LFS object {oid} is missing"))?;
+        if !metadata.file_type().is_file() || metadata.len() != size {
+            bail!("required source LFS object {oid} is missing or has the wrong size");
+        }
+        let destination_path = local_object_path(destination, &oid);
+        fs::create_dir_all(
+            destination_path
+                .parent()
+                .context("LFS object has no parent")?,
+        )?;
+        fs::copy(&source_path, &destination_path).with_context(|| {
+            format!(
+                "could not import LFS object {oid} from {}",
+                source_path.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

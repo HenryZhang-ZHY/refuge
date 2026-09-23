@@ -323,6 +323,16 @@ pub fn clone_mirror(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn lfs_media_dir(repo: &Path) -> Result<std::path::PathBuf> {
+    let output = run(Some(repo), &["lfs", "env"])?;
+    let text = String::from_utf8(output.stdout).context("git lfs returned non-UTF-8 settings")?;
+    let directory = text
+        .lines()
+        .find_map(|line| line.strip_prefix("LocalMediaDir="))
+        .context("git lfs did not report its local object directory")?;
+    Ok(std::path::PathBuf::from(directory))
+}
+
 pub fn clone_working(
     source: &Path,
     destination: &Path,

@@ -118,6 +118,89 @@ fn repo_import_preserves_all_refs() {
 }
 
 #[test]
+fn repo_import_copies_lfs_objects_before_initial_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    git_output(&source, &["init", "--initial-branch=main"]);
+    git_output(&source, &["config", "user.name", "Refuge Test"]);
+    git_output(&source, &["config", "user.email", "refuge@example.invalid"]);
+    git_output(&source, &["lfs", "install", "--local"]);
+    let storage = temp.path().join("custom-lfs-storage");
+    git_output(
+        &source,
+        &["config", "lfs.storage", storage.to_str().unwrap()],
+    );
+    git_output(&source, &["lfs", "track", "*.bin"]);
+    let contents = b"file stored outside the Git object database\n";
+    std::fs::write(source.join("asset.bin"), contents).unwrap();
+    git_output(&source, &["add", "."]);
+    git_output(&source, &["commit", "-m", "add LFS asset"]);
+    std::fs::write(
+        source.join("asset.bin"),
+        b"second version of the LFS asset\n",
+    )
+    .unwrap();
+    git_output(&source, &["add", "asset.bin"]);
+    git_output(&source, &["commit", "-m", "update LFS asset"]);
+    let media = git_output(&source, &["lfs", "env"])
+        .lines()
+        .find_map(|line| line.strip_prefix("LocalMediaDir="))
+        .map(PathBuf::from)
+        .unwrap();
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "import", "notes", source.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let imported = repos.join("notes.git");
+    let set = refuge::lfs::required_set(&imported).unwrap();
+    assert_eq!(set.len(), 2);
+    for (oid, size) in set {
+        let relative = Path::new(&oid[..2]).join(&oid[2..4]).join(&oid);
+        let content = std::fs::read(refuge::lfs::local_object_path(&imported, &oid)).unwrap();
+        assert_eq!(content, std::fs::read(media.join(relative)).unwrap());
+        assert_eq!(size, content.len() as u64);
+    }
+}
+
+#[test]
+fn repo_import_rejects_missing_lfs_objects_before_publishing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    git_output(&source, &["init", "--initial-branch=main"]);
+    git_output(&source, &["config", "user.name", "Refuge Test"]);
+    git_output(&source, &["config", "user.email", "refuge@example.invalid"]);
+    git_output(&source, &["lfs", "install", "--local"]);
+    git_output(&source, &["lfs", "track", "*.bin"]);
+    std::fs::write(source.join("asset.bin"), b"missing object\n").unwrap();
+    git_output(&source, &["add", "."]);
+    git_output(&source, &["commit", "-m", "add LFS asset"]);
+    let (oid, _) = refuge::lfs::required_set(&source)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let object = refuge::lfs::local_object_path(&source.join(".git"), &oid);
+    std::fs::remove_file(object).unwrap();
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "import", "notes", source.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(contains("required source LFS object"));
+    assert!(!repos.join("notes.git").exists());
+}
+
+#[test]
 fn repo_create_rejects_unsafe_name() {
     let temp = tempfile::tempdir().unwrap();
     let (config, _) = initialized(&temp);
