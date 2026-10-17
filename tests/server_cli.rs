@@ -41,10 +41,7 @@ fn backup_for(runtime: &std::path::Path) -> std::path::PathBuf {
     runtime.with_extension("backup")
 }
 
-fn start_server_with_backup(
-    runtime: &std::path::Path,
-    backup: &std::path::Path,
-) -> Server {
+fn start_server_with_backup(runtime: &std::path::Path, backup: &std::path::Path) -> Server {
     let mut command = Command::new(cargo_bin!("refuge"));
     command
         .arg("serve")
@@ -68,13 +65,38 @@ fn request(address: &str, request: &[u8]) -> String {
     response
 }
 
+/// Global Git configuration for client commands, so the machine's own
+/// settings (default branch, autocrlf, ...) cannot change what tests observe.
+fn git_config() -> &'static std::path::Path {
+    static CONFIG: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    CONFIG.get_or_init(|| {
+        let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("server_cli.gitconfig");
+        std::fs::write(
+            &path,
+            "[user]
+	name = Refuge Test
+	email = refuge@example.invalid
+             [init]
+	defaultBranch = main
+             [filter \"lfs\"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+             	process = git-lfs filter-process
+	required = true
+",
+        )
+        .expect("isolated Git configuration");
+        path
+    })
+}
+
 fn git(current_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new("git")
-        // Tests push `main`; don't depend on the machine's init.defaultBranch.
-        .args(["-c", "init.defaultBranch=main"])
         .arg("-C")
         .arg(current_dir)
         .args(args)
+        .env("GIT_CONFIG_GLOBAL", git_config())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .expect("run git")
