@@ -46,6 +46,8 @@ fn request(address: &str, request: &[u8]) -> String {
 
 fn git(current_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new("git")
+        // Tests push `main`; don't depend on the machine's init.defaultBranch.
+        .args(["-c", "init.defaultBranch=main"])
         .arg("-C")
         .arg(current_dir)
         .args(args)
