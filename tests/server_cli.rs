@@ -580,7 +580,13 @@ fn standard_git_lfs_clients_upload_and_download_over_http() {
             .into_iter()
             .flatten()
             .flat_map(|entry| walk_files(entry.unwrap().path()))
-            .filter(|path| path.to_string_lossy().contains("/lfs/objects/"))
+            .filter(|path| {
+                path.components()
+                    .map(|part| part.as_os_str())
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|pair| pair == ["lfs", "objects"])
+            })
             .count();
         if objects > 0 {
             break;
