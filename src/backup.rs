@@ -336,11 +336,11 @@ fn choose_parent<'a>(
     }
     let checks = git::batch_check(repository, &names)?;
     let mut exclusions = BTreeSet::new();
-    for pair in checks.chunks_exact(2) {
-        if matches!(pair[0], BatchCheck::Missing) {
+    for [object, commit] in checks.as_chunks::<2>().0 {
+        if matches!(object, BatchCheck::Missing) {
             return Ok((None, Vec::new()));
         }
-        if let BatchCheck::Found { oid, kind, .. } = &pair[1]
+        if let BatchCheck::Found { oid, kind, .. } = commit
             && kind == "commit"
         {
             exclusions.insert(oid.clone());
