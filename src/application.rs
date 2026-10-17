@@ -1,9 +1,12 @@
 use std::fmt;
 use std::path::Path;
 
+use anyhow::{Result, bail};
+
 use crate::backup::{self, BackupOutcome};
+use crate::catalog::{self, ProtectionState};
 use crate::config::Config;
-use crate::repo::{self, Repository};
+use crate::repo::{self, HostedRepository, Repository};
 
 pub struct ProvisionedRepository {
     pub repository: Repository,
@@ -84,6 +87,37 @@ fn provision(
         Ok(backup) => Ok(ProvisionedRepository { repository, backup }),
         Err(source) => Err(ProvisionError::InitialBackup { repository, source }),
     }
+}
+
+/// Removes a live repository while preserving every snapshot in the target.
+/// Unless forced, refuses when the newest snapshot does not hold the current
+/// refs, because removal would then lose history.
+pub fn remove_repository(config: &Config, selector: &str, force: bool) -> Result<HostedRepository> {
+    let repository = repo::resolve(config, selector)?;
+    let _name_lock = repo::lock_name(config, &repository.name)?;
+    let _identity_lock = repo::lock_identity(config, repository.id)?;
+    let _backup_lock = backup::lock_repository(config, repository.id)?;
+    if !force {
+        let reason = match catalog::repository_status(config, &repository)? {
+            ProtectionState::Protected { .. } => None,
+            ProtectionState::Pending => {
+                Some("has changes that are not in its newest snapshot".to_owned())
+            }
+            ProtectionState::Unprotected => Some("has no snapshot".to_owned()),
+            ProtectionState::Corrupt { reason } => {
+                Some(format!("has no valid newest snapshot ({reason})"))
+            }
+        };
+        if let Some(reason) = reason {
+            bail!(
+                "repository {} {reason}; run `refuge repo backup {}` first, or pass --force to remove it anyway",
+                repository.name,
+                repository.name
+            );
+        }
+    }
+    repo::delete(config, &repository)?;
+    Ok(repository)
 }
 
 #[cfg(test)]

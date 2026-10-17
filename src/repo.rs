@@ -61,6 +61,26 @@ fn create_staged(
     })
 }
 
+/// Deletes a live bare repository. Snapshots in the target are left untouched.
+/// The repository is first renamed out of the catalog so a failed cleanup never
+/// leaves a half-deleted repository listed.
+pub(crate) fn delete(config: &Config, repository: &HostedRepository) -> Result<()> {
+    let staging = tempfile::Builder::new()
+        .prefix(".refuge-remove-")
+        .tempdir_in(&config.repos_dir)?;
+    let staged = staging.path().join("repository.git");
+    std::fs::rename(&repository.path, &staged)
+        .with_context(|| format!("could not remove repository {}", repository.path.display()))?;
+    std::fs::remove_dir_all(staging.path()).with_context(|| {
+        format!(
+            "repository {} was unregistered, but {} could not be cleaned up",
+            repository.name,
+            staging.path().display()
+        )
+    })?;
+    Ok(())
+}
+
 pub fn find(config: &Config, name: &str) -> Result<PathBuf> {
     validate_name(name)?;
     let path = path_for(config, name);

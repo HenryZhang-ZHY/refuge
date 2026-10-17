@@ -78,17 +78,7 @@ fn backup_path_at(
         .strip_suffix(".git")
         .unwrap_or(file_name)
         .to_owned();
-    let locks = layout::locks_dir(config);
-    fs::create_dir_all(&locks)?;
-    let lock_path = locks.join(format!("{repo_id}.lock"));
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("could not open lock file {}", lock_path.display()))?;
-    fs2::FileExt::lock_exclusive(&lock).context("could not lock repository backup")?;
+    let _lock = lock_repository(config, repo_id)?;
     let staging = layout::staging_dir(config);
     fs::create_dir_all(&staging)?;
     let operation = tempfile::Builder::new()
@@ -282,6 +272,23 @@ fn backup_path_at(
         });
     }
     unreachable!()
+}
+
+/// Serializes backups of one repository identity, and lets removal wait for an
+/// in-flight backup to finish.
+pub(crate) fn lock_repository(config: &Config, repo_id: Uuid) -> Result<fs::File> {
+    let locks = layout::locks_dir(config);
+    fs::create_dir_all(&locks)?;
+    let lock_path = locks.join(format!("{repo_id}.lock"));
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("could not open lock file {}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock).context("could not lock repository backup")?;
+    Ok(lock)
 }
 
 fn create_bundle(repository: &Path, destination: &Path, exclusions: &[String]) -> Result<()> {

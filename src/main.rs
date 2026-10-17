@@ -136,6 +136,23 @@ enum RepoCommands {
     /// List hosted repositories.
     #[command(alias = "ls")]
     List,
+    /// Remove a hosted repository. Its snapshots stay in the target.
+    #[command(
+        alias = "rm",
+        after_help = "Examples:
+  refuge repo remove notes
+  refuge repo remove notes --force
+
+Snapshots are never deleted; recover with `refuge restore <NAME>`."
+    )]
+    Remove {
+        /// Hosted repository name or stable UUID.
+        #[arg(value_name = "NAME_OR_REPO_ID")]
+        selector: String,
+        /// Remove even if the newest snapshot does not contain the current refs.
+        #[arg(long)]
+        force: bool,
+    },
     /// Clone a hosted repository into a working directory.
     #[command(
         after_help = "Examples:\n  refuge repo clone notes\n  refuge repo clone notes <DIRECTORY>\n  refuge repo clone notes -- --depth=1"
@@ -322,6 +339,15 @@ fn run() -> Result<()> {
                             repository.path.display()
                         );
                     }
+                }
+                RepoCommands::Remove { selector, force } => {
+                    let repository =
+                        refuge::application::remove_repository(&config, &selector, force)?;
+                    println!(
+                        "removed repository {} ({})
+Snapshots were kept; restore with `refuge restore {}`",
+                        repository.name, repository.id, repository.name
+                    );
                 }
                 RepoCommands::Clone {
                     selector,

@@ -222,6 +222,21 @@ refuge restore notes
 refuge restore notes --snapshot <SNAPSHOT_ID> --as recovered-notes
 ```
 
+## Remove a repository
+
+`repo remove` deletes the live bare repository and leaves every snapshot in
+the target directory, so the repository can be brought back with
+`refuge restore`:
+
+```powershell
+refuge repo remove notes
+refuge restore notes   # bring it back later
+```
+
+It refuses when the newest snapshot does not contain the current refs (run
+`refuge repo backup notes` first), unless you pass `--force`. Refuge has no
+command that deletes snapshots.
+
 ## Manual backup
 
 Useful if you skipped the hook. It is idempotent when the current refs are

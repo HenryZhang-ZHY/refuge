@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use refuge::git;
 
@@ -501,4 +502,112 @@ fn import_defaults_to_current_directory_and_publishes_initial_snapshot() {
         .assert()
         .success()
         .stdout(contains("notes: Protected locally"));
+}
+
+fn import_committed(temp: &tempfile::TempDir, config: &Path, name: &str) {
+    let source = temp.path().join(format!("{name}-source"));
+    std::fs::create_dir(&source).unwrap();
+    git_output(&source, &["init", "--initial-branch=main"]);
+    git_output(&source, &["config", "user.name", "Refuge Test"]);
+    git_output(&source, &["config", "user.email", "refuge@example.invalid"]);
+    std::fs::write(source.join("entry.txt"), "one\n").unwrap();
+    git_output(&source, &["add", "entry.txt"]);
+    git_output(&source, &["commit", "-m", "initial"]);
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", config)
+        .args(["repo", "import", name, source.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn repo_remove_deletes_live_repository_but_preserves_snapshots_for_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+    import_committed(&temp, &config, "notes");
+    let hosted = repos.join("notes.git");
+    let expected = git::ref_state(&hosted).unwrap();
+    let repo_id = git_output(&hosted, &["config", "refuge.repoid"]);
+    let snapshots = temp
+        .path()
+        .join("target")
+        .join(refuge::layout::TARGET_ROOT)
+        .join(&repo_id)
+        .join("snapshots");
+    let before = std::fs::read_dir(&snapshots).unwrap().count();
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "remove", "notes"])
+        .assert()
+        .success()
+        .stdout(contains("removed repository notes"))
+        .stdout(contains("refuge restore notes"));
+
+    assert!(!hosted.exists());
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "list"])
+        .assert()
+        .success()
+        .stdout(contains("notes").not());
+    assert_eq!(std::fs::read_dir(&snapshots).unwrap().count(), before);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["restore", "notes"])
+        .assert()
+        .success();
+    assert_eq!(git::ref_state(&hosted).unwrap().refs, expected.refs);
+}
+
+#[test]
+fn repo_remove_refuses_changes_missing_from_the_newest_snapshot_unless_forced() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, repos) = initialized(&temp);
+    import_committed(&temp, &config, "notes");
+    let hosted = repos.join("notes.git");
+    git_output(&hosted, &["branch", "unsaved", "main"]);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "remove", "notes"])
+        .assert()
+        .failure()
+        .stderr(contains("refuge repo backup notes"))
+        .stderr(contains("--force"));
+    assert!(hosted.is_dir());
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "remove", "notes", "--force"])
+        .assert()
+        .success();
+    assert!(!hosted.exists());
+}
+
+#[test]
+fn repo_remove_requires_an_explicit_existing_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, _) = initialized(&temp);
+
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "remove"])
+        .assert()
+        .failure();
+    Command::cargo_bin("refuge")
+        .unwrap()
+        .env("REFUGE_CONFIG", &config)
+        .args(["repo", "remove", "missing"])
+        .assert()
+        .failure()
+        .stderr(contains("repository does not exist: missing"));
 }
