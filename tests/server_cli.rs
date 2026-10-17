@@ -9,7 +9,31 @@ use assert_cmd::cargo::cargo_bin;
 
 const OWNER_SECRET: &str = "test-owner-key-0123456789";
 
-fn start_server(store: &std::path::Path) -> std::process::Child {
+/// Kills the server when dropped, so a failing assertion cannot leave an
+/// orphaned `refuge serve` holding the test harness's output pipes open.
+struct Server(std::process::Child);
+
+impl std::ops::Deref for Server {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Server {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn start_server(store: &std::path::Path) -> Server {
     start_server_with_backup(store, &backup_for(store))
 }
 
@@ -20,7 +44,7 @@ fn backup_for(runtime: &std::path::Path) -> std::path::PathBuf {
 fn start_server_with_backup(
     runtime: &std::path::Path,
     backup: &std::path::Path,
-) -> std::process::Child {
+) -> Server {
     let mut command = Command::new(cargo_bin!("refuge"));
     command
         .arg("serve")
@@ -33,7 +57,7 @@ fn start_server_with_backup(
         .env("PATH", support::path_with_refuge())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.spawn().expect("start refuge serve")
+    Server(command.spawn().expect("start refuge serve"))
 }
 
 fn request(address: &str, request: &[u8]) -> String {
@@ -92,9 +116,8 @@ fn address(child: &mut std::process::Child) -> String {
     panic!("server did not report its address");
 }
 
-fn stop(mut child: std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn stop(server: Server) {
+    drop(server);
 }
 
 #[test]
